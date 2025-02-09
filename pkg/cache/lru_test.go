@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package cache
 
@@ -21,11 +10,13 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/jaegertracing/jaeger/pkg/testutils"
 )
 
 func TestLRU(t *testing.T) {
 	cache := NewLRUWithOptions(4, &Options{
-		OnEvict: func(k string, i interface{}) {
+		OnEvict: func(_ string, _ any) {
 			// do nothing, just for code coverage
 		},
 	})
@@ -65,7 +56,7 @@ func TestCompareAndSwap(t *testing.T) {
 	cache := NewLRU(2)
 
 	item, ok := cache.CompareAndSwap("A", nil, "Foo")
-	assert.Equal(t, true, ok)
+	assert.True(t, ok)
 	assert.Equal(t, "Foo", item)
 	assert.Equal(t, "Foo", cache.Get("A"))
 	assert.Nil(t, cache.Get("B"))
@@ -137,7 +128,7 @@ func TestDefaultClock(t *testing.T) {
 	assert.Equal(t, 0, cache.Size())
 }
 
-func TestLRUCacheConcurrentAccess(t *testing.T) {
+func TestLRUCacheConcurrentAccess(*testing.T) {
 	cache := NewLRU(5)
 	values := map[string]string{
 		"A": "foo",
@@ -174,7 +165,7 @@ func TestLRUCacheConcurrentAccess(t *testing.T) {
 func TestRemoveFunc(t *testing.T) {
 	ch := make(chan bool)
 	cache := NewLRUWithOptions(5, &Options{
-		OnEvict: func(k string, i interface{}) {
+		OnEvict: func(_ string, i any) {
 			go func() {
 				_, ok := i.(*testing.T)
 				assert.True(t, ok)
@@ -200,7 +191,7 @@ func TestRemovedFuncWithTTL(t *testing.T) {
 	ch := make(chan bool)
 	cache := NewLRUWithOptions(5, &Options{
 		TTL: time.Millisecond * 5,
-		OnEvict: func(k string, i interface{}) {
+		OnEvict: func(_ string, i any) {
 			go func() {
 				_, ok := i.(*testing.T)
 				assert.True(t, ok)
@@ -239,4 +230,8 @@ func (c *simulatedClock) Elapse(d time.Duration) time.Time {
 	defer c.Unlock()
 	c.currTime = c.currTime.Add(d)
 	return c.currTime
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

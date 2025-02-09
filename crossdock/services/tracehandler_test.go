@@ -1,33 +1,23 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package services
 
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/uber/jaeger-client-go"
 	"go.uber.org/zap"
 
@@ -72,10 +62,10 @@ func TestConvertTagsIntoMap(t *testing.T) {
 }
 
 func TestRunTest(t *testing.T) {
-	errFunc := func(service string, request *traceRequest) ([]*ui.Trace, error) {
+	errFunc := func(_ /* service */ string, _ *traceRequest) ([]*ui.Trace, error) {
 		return nil, errors.New("test error")
 	}
-	successFunc := func(service string, request *traceRequest) ([]*ui.Trace, error) {
+	successFunc := func(_ /* service */ string, _ *traceRequest) ([]*ui.Trace, error) {
 		return []*ui.Trace{}, nil
 	}
 
@@ -104,9 +94,9 @@ func TestRunTest(t *testing.T) {
 	for _, test := range tests {
 		err := handler.runTest("service", &test.request, test.f, validateTracesWithCount)
 		if test.shouldErr {
-			assert.Error(t, err)
+			require.Error(t, err)
 		} else {
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		}
 	}
 }
@@ -174,9 +164,9 @@ func TestValidateTracesWithCount(t *testing.T) {
 	for _, test := range tests {
 		err := validateTracesWithCount(&test.expected, test.actual)
 		if test.errMsg == "" {
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		} else {
-			assert.EqualError(t, err, test.errMsg)
+			require.EqualError(t, err, test.errMsg)
 		}
 	}
 }
@@ -219,23 +209,23 @@ func TestCreateTrace(t *testing.T) {
 
 	handler := &TraceHandler{
 		logger: zap.NewNop(),
-		getClientURL: func(service string) string {
+		getClientURL: func(_ /* service */ string) string {
 			return ""
 		},
 	}
 
 	err := handler.createTrace("svc", &traceRequest{Operation: "op"})
-	assert.Error(t, err)
+	require.Error(t, err)
 
-	handler.getClientURL = func(service string) string {
+	handler.getClientURL = func(_ /* service */ string) string {
 		return server.URL
 	}
 
 	err = handler.createTrace("svc", &traceRequest{Operation: badOperation})
-	assert.EqualError(t, err, "retrieved 400 status code from client service")
+	require.EqualError(t, err, "retrieved 400 status code from client service")
 
 	err = handler.createTrace("svc", &traceRequest{Operation: "op"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestTraceHandlerGetTraces(t *testing.T) {
@@ -260,7 +250,7 @@ func TestCreateTracesLoop(t *testing.T) {
 	handler := &TraceHandler{
 		logger:                   zap.NewNop(),
 		createTracesLoopInterval: time.Millisecond,
-		getClientURL: func(service string) string {
+		getClientURL: func(_ /* service */ string) string {
 			return server.URL
 		},
 	}
@@ -275,7 +265,7 @@ func TestCreateTracesLoop(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	assert.True(t, h.CallCount() > 0)
+	assert.Positive(t, h.CallCount())
 }
 
 func TestValidateAdaptiveSamplingTraces(t *testing.T) {
@@ -387,9 +377,9 @@ func TestValidateAdaptiveSamplingTraces(t *testing.T) {
 	for _, test := range tests {
 		err := validateAdaptiveSamplingTraces(&test.expected, test.actual)
 		if test.errMsg == "" {
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		} else {
-			assert.EqualError(t, err, test.errMsg)
+			require.EqualError(t, err, test.errMsg)
 		}
 	}
 }
@@ -424,7 +414,7 @@ func TestAdaptiveSamplingTestInternal(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			query := &mocks.QueryService{}
 			agent := &mocks.AgentService{}
 
@@ -432,7 +422,7 @@ func TestAdaptiveSamplingTestInternal(t *testing.T) {
 				agent:  agent,
 				query:  query,
 				logger: zap.NewNop(),
-				getClientURL: func(service string) string {
+				getClientURL: func(_ /* service */ string) string {
 					return server.URL
 				},
 				createTracesLoopInterval:              time.Second,
@@ -450,9 +440,9 @@ func TestAdaptiveSamplingTestInternal(t *testing.T) {
 
 			_, err := handler.adaptiveSamplingTest("svc", &traceRequest{Operation: "op"})
 			if test.errMsg != "" {
-				assert.EqualError(t, err, test.errMsg)
+				require.EqualError(t, err, test.errMsg)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}
@@ -475,7 +465,7 @@ func TestEndToEndTest(t *testing.T) {
 
 	server := httptest.NewServer(&testClientHandler{})
 	defer server.Close()
-	handler.getClientURL = func(service string) string {
+	handler.getClientURL = func(_ /* service */ string) string {
 		return server.URL
 	}
 
@@ -505,7 +495,7 @@ func TestAdaptiveSamplingTest(t *testing.T) {
 		agent:  agent,
 		query:  query,
 		logger: zap.NewNop(),
-		getClientURL: func(service string) string {
+		getClientURL: func(_ /* service */ string) string {
 			return server.URL
 		},
 		getTags: func() map[string]string {

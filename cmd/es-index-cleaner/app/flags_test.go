@@ -1,16 +1,5 @@
 // Copyright (c) 2021 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -46,8 +35,8 @@ func TestBindFlags(t *testing.T) {
 
 	c.InitFromViper(v)
 	assert.Equal(t, "tenant1-", c.IndexPrefix)
-	assert.Equal(t, true, c.Rollover)
-	assert.Equal(t, true, c.Archive)
+	assert.True(t, c.Rollover)
+	assert.True(t, c.Archive)
 	assert.Equal(t, 150, c.MasterNodeTimeoutSeconds)
 	assert.Equal(t, "@", c.IndexDateSeparator)
 	assert.Equal(t, "admin", c.Username)

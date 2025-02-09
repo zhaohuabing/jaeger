@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package consumer
 
@@ -20,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	kafka "github.com/jaegertracing/jaeger/cmd/ingester/app/consumer/mocks"
 	"github.com/jaegertracing/jaeger/cmd/ingester/app/processor/mocks"
@@ -43,7 +33,7 @@ func TestNewCommittingProcessor(t *testing.T) {
 	msg := &kafka.Message{}
 	msg.On("Offset").Return(msgOffset)
 
-	assert.NoError(t, committingProcessor.Process(msg))
+	require.NoError(t, committingProcessor.Process(msg))
 
 	spanProcessor.AssertExpectations(t)
 	assert.Equal(t, msgOffset, offsetMarker.capturedOffset)
@@ -56,7 +46,7 @@ func TestNewCommittingProcessorError(t *testing.T) {
 	committingProcessor := NewCommittingProcessor(spanProcessor, offsetMarker)
 	msg := &kafka.Message{}
 
-	assert.Error(t, committingProcessor.Process(msg))
+	require.Error(t, committingProcessor.Process(msg))
 
 	spanProcessor.AssertExpectations(t)
 	assert.Equal(t, int64(0), offsetMarker.capturedOffset)
@@ -64,12 +54,12 @@ func TestNewCommittingProcessorError(t *testing.T) {
 
 type fakeProcessorMessage struct{}
 
-func (f fakeProcessorMessage) Value() []byte {
+func (fakeProcessorMessage) Value() []byte {
 	return nil
 }
 
 func TestNewCommittingProcessorErrorNoKafkaMessage(t *testing.T) {
 	committingProcessor := NewCommittingProcessor(&mocks.SpanProcessor{}, &fakeOffsetMarker{})
 
-	assert.Error(t, committingProcessor.Process(fakeProcessorMessage{}))
+	require.Error(t, committingProcessor.Process(fakeProcessorMessage{}))
 }

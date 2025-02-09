@@ -1,16 +1,5 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package reporter
 
@@ -25,10 +14,10 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/jaeger"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/zipkincore"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/testutils"
 	"github.com/jaegertracing/jaeger/internal/metricstest"
-	"github.com/jaegertracing/jaeger/thrift-gen/jaeger"
-	"github.com/jaegertracing/jaeger/thrift-gen/zipkincore"
 )
 
 type clientMetricsTest struct {
@@ -42,11 +31,9 @@ func (tr *clientMetricsTest) assertLog(t *testing.T, msg, clientUUID string) {
 	logs := tr.logs.FilterMessageSnippet(msg)
 	if clientUUID == "" {
 		assert.Equal(t, 0, logs.Len(), "not expecting log '%s", msg)
-	} else {
-		if assert.Equal(t, 1, logs.Len(), "expecting one log '%s'", msg) {
-			field := logs.All()[0].ContextMap()["client-uuid"]
-			assert.Equal(t, clientUUID, field, "client-uuid should be logged")
-		}
+	} else if assert.Equal(t, 1, logs.Len(), "expecting one log '%s'", msg) {
+		field := logs.All()[0].ContextMap()["client-uuid"]
+		assert.Equal(t, clientUUID, field, "client-uuid should be logged")
 	}
 }
 
@@ -58,6 +45,7 @@ func testClientMetricsWithParams(params ClientMetricsReporterParams, fn func(tr 
 	r1 := testutils.NewInMemoryReporter()
 	zapCore, logs := observer.New(zap.DebugLevel)
 	mb := metricstest.NewFactory(time.Hour)
+	defer mb.Stop()
 
 	params.Reporter = r1
 	params.Logger = zap.New(zapCore)
@@ -77,7 +65,7 @@ func testClientMetricsWithParams(params ClientMetricsReporterParams, fn func(tr 
 
 func TestClientMetricsReporter_Zipkin(t *testing.T) {
 	testClientMetrics(func(tr *clientMetricsTest) {
-		assert.NoError(t, tr.r.EmitZipkinBatch(context.Background(), []*zipkincore.Span{{}}))
+		require.NoError(t, tr.r.EmitZipkinBatch(context.Background(), []*zipkincore.Span{{}}))
 		assert.Len(t, tr.mr.ZipkinSpans(), 1)
 	})
 }
@@ -183,7 +171,7 @@ func TestClientMetricsReporter_Jaeger(t *testing.T) {
 				}
 
 				err := tr.r.EmitBatch(context.Background(), batch)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				assert.Len(t, tr.mr.Spans(), i+1)
 
 				tr.assertLog(t, "new client", test.expLog)
@@ -250,7 +238,7 @@ func TestClientMetricsReporter_Expire(t *testing.T) {
 			assert.EqualValues(t, 0, getGauge(), "start with gauge=0")
 
 			err := tr.r.EmitBatch(context.Background(), batch)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Len(t, tr.mr.Spans(), 1)
 
 			// we want this test to pass asap, but need to account for possible CPU contention in the CI

@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package adjuster
 
@@ -21,7 +10,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 )
 
 // ClockSkew returns an adjuster that modifies start time and log timestamps
@@ -30,12 +19,11 @@ import (
 // child spans do not start before or end after their parent spans.
 //
 // The algorithm assumes that all spans have unique IDs, so the trace may need
-// to go through another adjuster first, such as SpanIDDeduper.
+// to go through another adjuster first, such as ZipkinSpanIDUniquifier.
 //
-// This adjuster never returns any errors. Instead it records any issues
-// it encounters in Span.Warnings.
+// Any issues encountered by the adjuster are recorded in Span.Warnings.
 func ClockSkew(maxDelta time.Duration) Adjuster {
-	return Func(func(trace *model.Trace) (*model.Trace, error) {
+	return Func(func(trace *model.Trace) {
 		adjuster := &clockSkewAdjuster{
 			trace:    trace,
 			maxDelta: maxDelta,
@@ -46,7 +34,6 @@ func ClockSkew(maxDelta time.Duration) Adjuster {
 			skew := clockSkew{hostKey: n.hostKey}
 			adjuster.adjustNode(n, nil, skew)
 		}
-		return adjuster.trace, nil
 	})
 }
 
@@ -87,6 +74,7 @@ func hostKey(span *model.Span) string {
 		if tag.VType == model.Int64Type {
 			var buf [4]byte // avoid heap allocation
 			ip := buf[0:4]  // utils require a slice, not an array
+			//nolint: gosec // G115
 			binary.BigEndian.PutUint32(ip, uint32(tag.Int64()))
 			return net.IP(ip).String()
 		}
@@ -119,7 +107,6 @@ func (a *clockSkewAdjuster) buildNodesMap() {
 func (a *clockSkewAdjuster) buildSubGraphs() {
 	a.roots = make(map[model.SpanID]*node)
 	for _, n := range a.spans {
-		// TODO handle FOLLOWS_FROM references
 		if n.span.ParentSpanID() == 0 {
 			a.roots[n.span.SpanID] = n
 			continue
@@ -150,7 +137,7 @@ func (a *clockSkewAdjuster) adjustNode(n *node, parent *node, skew clockSkew) {
 	}
 }
 
-func (a *clockSkewAdjuster) calculateSkew(child *node, parent *node) time.Duration {
+func (*clockSkewAdjuster) calculateSkew(child *node, parent *node) time.Duration {
 	parentDuration := parent.span.Duration
 	childDuration := child.span.Duration
 	parentEndTime := parent.span.StartTime.Add(parent.span.Duration)

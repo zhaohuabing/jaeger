@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# Copyright (c) 2024 The Jaeger Authors.
+# SPDX-License-Identifier: Apache-2.0
+
 # The following commands were used to create the CA, server and client's certificates and keys in this directory used by unit tests.
 # These certificates use the Subject Alternative Name extension rather than the Common Name, which will be unsupported in Go 1.15.
 
@@ -91,7 +94,6 @@ openssl x509 -req \
              -sha256 \
              -days 3650 \
              -in "$tmp_dir/example-server.csr" \
-             -signkey "$tmp_dir/example-server-key.pem" \
              -out "$tmp_dir/example-server-cert.pem" \
              -extensions req_ext \
              -CA "$tmp_dir/example-CA-cert.pem" \
@@ -102,7 +104,6 @@ openssl x509 -req \
              -sha256 \
              -days 3650 \
              -in "$tmp_dir/example-client.csr" \
-             -signkey "$tmp_dir/example-client-key.pem" \
              -out "$tmp_dir/example-client-cert.pem" \
              -extensions req_ext \
              -CA "$tmp_dir/example-CA-cert.pem" \

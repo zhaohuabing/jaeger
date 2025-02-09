@@ -1,50 +1,106 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
 	"context"
+	"expvar"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/confignet"
+	"go.opentelemetry.io/collector/config/configtls"
 	"go.uber.org/zap"
 
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/flags"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/processor"
-	"github.com/jaegertracing/jaeger/internal/metrics/fork"
 	"github.com/jaegertracing/jaeger/internal/metricstest"
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger/internal/storage/v2/v1adapter"
 	"github.com/jaegertracing/jaeger/pkg/healthcheck"
 	"github.com/jaegertracing/jaeger/pkg/tenancy"
-	"github.com/jaegertracing/jaeger/thrift-gen/sampling"
 )
 
 var _ (io.Closer) = (*Collector)(nil)
 
 func optionsForEphemeralPorts() *flags.CollectorOptions {
-	collectorOpts := &flags.CollectorOptions{}
-	collectorOpts.GRPC.HostPort = ":0"
-	collectorOpts.HTTP.HostPort = ":0"
-	collectorOpts.OTLP.Enabled = true
-	collectorOpts.OTLP.GRPC.HostPort = ":0"
-	collectorOpts.OTLP.HTTP.HostPort = ":0"
-	collectorOpts.Zipkin.HTTPHostPort = ":0"
+	collectorOpts := &flags.CollectorOptions{
+		HTTP: confighttp.ServerConfig{
+			Endpoint:   ":0",
+			TLSSetting: &configtls.ServerConfig{},
+		},
+		GRPC: configgrpc.ServerConfig{
+			NetAddr: confignet.AddrConfig{
+				Endpoint:  ":0",
+				Transport: confignet.TransportTypeTCP,
+			},
+			Keepalive: &configgrpc.KeepaliveServerConfig{
+				ServerParameters: &configgrpc.KeepaliveServerParameters{
+					MaxConnectionIdle: 10,
+				},
+			},
+		},
+		OTLP: struct {
+			Enabled bool
+			GRPC    configgrpc.ServerConfig
+			HTTP    confighttp.ServerConfig
+		}{
+			Enabled: true,
+			HTTP: confighttp.ServerConfig{
+				Endpoint:   ":0",
+				TLSSetting: &configtls.ServerConfig{},
+			},
+			GRPC: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint:  ":0",
+					Transport: confignet.TransportTypeTCP,
+				},
+				Keepalive: &configgrpc.KeepaliveServerConfig{
+					ServerParameters: &configgrpc.KeepaliveServerParameters{
+						MaxConnectionIdle: 10,
+					},
+				},
+			},
+		},
+		Zipkin: struct {
+			confighttp.ServerConfig
+			KeepAlive bool
+		}{
+			ServerConfig: confighttp.ServerConfig{
+				Endpoint: ":0",
+			},
+		},
+		Tenancy: tenancy.Options{},
+	}
 	return collectorOpts
+}
+
+type mockAggregator struct {
+	callCount  atomic.Int32
+	closeCount atomic.Int32
+}
+
+func (t *mockAggregator) RecordThroughput(string /* service */, string /* operation */, model.SamplerType, float64 /* probability */) {
+	t.callCount.Add(1)
+}
+
+func (t *mockAggregator) HandleRootSpan(*model.Span) {
+	t.callCount.Add(1)
+}
+
+func (*mockAggregator) Start() {}
+
+func (t *mockAggregator) Close() error {
+	t.closeCount.Add(1)
+	return nil
 }
 
 func TestNewCollector(t *testing.T) {
@@ -52,24 +108,25 @@ func TestNewCollector(t *testing.T) {
 	hc := healthcheck.New()
 	logger := zap.NewNop()
 	baseMetrics := metricstest.NewFactory(time.Hour)
+	defer baseMetrics.Backend.Stop()
 	spanWriter := &fakeSpanWriter{}
-	strategyStore := &mockStrategyStore{}
+	samplingProvider := &mockSamplingProvider{}
 	tm := &tenancy.Manager{}
 
 	c := New(&CollectorParams{
-		ServiceName:    "collector",
-		Logger:         logger,
-		MetricsFactory: baseMetrics,
-		SpanWriter:     spanWriter,
-		StrategyStore:  strategyStore,
-		HealthCheck:    hc,
-		TenancyMgr:     tm,
+		ServiceName:      "collector",
+		Logger:           logger,
+		MetricsFactory:   baseMetrics,
+		TraceWriter:      v1adapter.NewTraceWriter(spanWriter),
+		SamplingProvider: samplingProvider,
+		HealthCheck:      hc,
+		TenancyMgr:       tm,
 	})
 
 	collectorOpts := optionsForEphemeralPorts()
 	require.NoError(t, c.Start(collectorOpts))
 	assert.NotNil(t, c.SpanHandlers())
-	assert.NoError(t, c.Close())
+	require.NoError(t, c.Close())
 }
 
 func TestCollector_StartErrors(t *testing.T) {
@@ -78,73 +135,77 @@ func TestCollector_StartErrors(t *testing.T) {
 			hc := healthcheck.New()
 			logger := zap.NewNop()
 			baseMetrics := metricstest.NewFactory(time.Hour)
+			defer baseMetrics.Backend.Stop()
 			spanWriter := &fakeSpanWriter{}
-			strategyStore := &mockStrategyStore{}
+			samplingProvider := &mockSamplingProvider{}
 			tm := &tenancy.Manager{}
 
 			c := New(&CollectorParams{
-				ServiceName:    "collector",
-				Logger:         logger,
-				MetricsFactory: baseMetrics,
-				SpanWriter:     spanWriter,
-				StrategyStore:  strategyStore,
-				HealthCheck:    hc,
-				TenancyMgr:     tm,
+				ServiceName:      "collector",
+				Logger:           logger,
+				MetricsFactory:   baseMetrics,
+				TraceWriter:      v1adapter.NewTraceWriter(spanWriter),
+				SamplingProvider: samplingProvider,
+				HealthCheck:      hc,
+				TenancyMgr:       tm,
 			})
 			err := c.Start(options)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), expErr)
+			require.ErrorContains(t, err, expErr)
+			require.NoError(t, c.Close())
 		})
 	}
 
 	var options *flags.CollectorOptions
 
 	options = optionsForEphemeralPorts()
-	options.GRPC.HostPort = ":-1"
+	options.GRPC.NetAddr.Endpoint = ":-1"
 	run("gRPC", options, "could not start gRPC server")
 
 	options = optionsForEphemeralPorts()
-	options.HTTP.HostPort = ":-1"
+	options.HTTP.Endpoint = ":-1"
 	run("HTTP", options, "could not start HTTP server")
 
 	options = optionsForEphemeralPorts()
-	options.Zipkin.HTTPHostPort = ":-1"
-	run("Zipkin", options, "could not start Zipkin server")
+	options.Zipkin.Endpoint = ":-1"
+	run("Zipkin", options, "could not start Zipkin receiver")
 
 	options = optionsForEphemeralPorts()
-	options.OTLP.GRPC.HostPort = ":-1"
+	options.OTLP.GRPC.NetAddr.Endpoint = ":-1"
 	run("OTLP/GRPC", options, "could not start OTLP receiver")
 
 	options = optionsForEphemeralPorts()
-	options.OTLP.HTTP.HostPort = ":-1"
+	options.OTLP.HTTP.Endpoint = ":-1"
 	run("OTLP/HTTP", options, "could not start OTLP receiver")
 }
 
-type mockStrategyStore struct{}
+type mockSamplingProvider struct{}
 
-func (m *mockStrategyStore) GetSamplingStrategy(_ context.Context, serviceName string) (*sampling.SamplingStrategyResponse, error) {
-	return &sampling.SamplingStrategyResponse{}, nil
+func (*mockSamplingProvider) GetSamplingStrategy(context.Context, string /* serviceName */) (*api_v2.SamplingStrategyResponse, error) {
+	return &api_v2.SamplingStrategyResponse{}, nil
+}
+
+func (*mockSamplingProvider) Close() error {
+	return nil
 }
 
 func TestCollector_PublishOpts(t *testing.T) {
 	// prepare
 	hc := healthcheck.New()
 	logger := zap.NewNop()
-	baseMetrics := metricstest.NewFactory(time.Second)
-	forkFactory := metricstest.NewFactory(time.Second)
-	metricsFactory := fork.New("internal", forkFactory, baseMetrics)
+	metricsFactory := metricstest.NewFactory(time.Second)
+	defer metricsFactory.Backend.Stop()
 	spanWriter := &fakeSpanWriter{}
-	strategyStore := &mockStrategyStore{}
+	samplingProvider := &mockSamplingProvider{}
 	tm := &tenancy.Manager{}
 
 	c := New(&CollectorParams{
-		ServiceName:    "collector",
-		Logger:         logger,
-		MetricsFactory: metricsFactory,
-		SpanWriter:     spanWriter,
-		StrategyStore:  strategyStore,
-		HealthCheck:    hc,
-		TenancyMgr:     tm,
+		ServiceName:      "collector",
+		Logger:           logger,
+		MetricsFactory:   metricsFactory,
+		TraceWriter:      v1adapter.NewTraceWriter(spanWriter),
+		SamplingProvider: samplingProvider,
+		HealthCheck:      hc,
+		TenancyMgr:       tm,
 	})
 	collectorOpts := optionsForEphemeralPorts()
 	collectorOpts.NumWorkers = 24
@@ -152,15 +213,9 @@ func TestCollector_PublishOpts(t *testing.T) {
 
 	require.NoError(t, c.Start(collectorOpts))
 	defer c.Close()
-
-	forkFactory.AssertGaugeMetrics(t, metricstest.ExpectedMetric{
-		Name:  "internal.collector.num-workers",
-		Value: 24,
-	})
-	forkFactory.AssertGaugeMetrics(t, metricstest.ExpectedMetric{
-		Name:  "internal.collector.queue-size",
-		Value: 42,
-	})
+	c.publishOpts(collectorOpts)
+	assert.EqualValues(t, 24, expvar.Get(metricNumWorkers).(*expvar.Int).Value())
+	assert.EqualValues(t, 42, expvar.Get(metricQueueSize).(*expvar.Int).Value())
 }
 
 func TestAggregator(t *testing.T) {
@@ -168,20 +223,21 @@ func TestAggregator(t *testing.T) {
 	hc := healthcheck.New()
 	logger := zap.NewNop()
 	baseMetrics := metricstest.NewFactory(time.Hour)
+	defer baseMetrics.Backend.Stop()
 	spanWriter := &fakeSpanWriter{}
-	strategyStore := &mockStrategyStore{}
+	samplingProvider := &mockSamplingProvider{}
 	agg := &mockAggregator{}
 	tm := &tenancy.Manager{}
 
 	c := New(&CollectorParams{
-		ServiceName:    "collector",
-		Logger:         logger,
-		MetricsFactory: baseMetrics,
-		SpanWriter:     spanWriter,
-		StrategyStore:  strategyStore,
-		HealthCheck:    hc,
-		Aggregator:     agg,
-		TenancyMgr:     tm,
+		ServiceName:        "collector",
+		Logger:             logger,
+		MetricsFactory:     baseMetrics,
+		TraceWriter:        v1adapter.NewTraceWriter(spanWriter),
+		SamplingProvider:   samplingProvider,
+		HealthCheck:        hc,
+		SamplingAggregator: agg,
+		TenancyMgr:         tm,
 	})
 	collectorOpts := optionsForEphemeralPorts()
 	collectorOpts.NumWorkers = 10
@@ -207,9 +263,14 @@ func TestAggregator(t *testing.T) {
 			},
 		},
 	}
-	_, err := c.spanProcessor.ProcessSpans(spans, processor.SpansOptions{SpanFormat: processor.JaegerSpanFormat})
-	assert.NoError(t, err)
-	assert.NoError(t, c.Close())
+	_, err := c.spanProcessor.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: spans,
+		Details: processor.Details{
+			SpanFormat: processor.JaegerSpanFormat,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, c.Close())
 
 	// spans are processed by background workers, so we may need to wait
 	for i := 0; i < 1000; i++ {

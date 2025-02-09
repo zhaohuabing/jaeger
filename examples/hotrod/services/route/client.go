@@ -1,27 +1,14 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package route
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 
-	"github.com/opentracing-contrib/go-stdlib/nethttp"
-	"github.com/opentracing/opentracing-go"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger/examples/hotrod/pkg/log"
@@ -30,21 +17,16 @@ import (
 
 // Client is a remote client that implements route.Interface
 type Client struct {
-	tracer   opentracing.Tracer
 	logger   log.Factory
 	client   *tracing.HTTPClient
 	hostPort string
 }
 
 // NewClient creates a new route.Client
-func NewClient(tracer opentracing.Tracer, logger log.Factory, hostPort string) *Client {
+func NewClient(tracer trace.TracerProvider, logger log.Factory, hostPort string) *Client {
 	return &Client{
-		tracer: tracer,
-		logger: logger,
-		client: &tracing.HTTPClient{
-			Client: &http.Client{Transport: &nethttp.Transport{}},
-			Tracer: tracer,
-		},
+		logger:   logger,
+		client:   tracing.NewHTTPClient(tracer),
 		hostPort: hostPort,
 	}
 }
@@ -56,9 +38,9 @@ func (c *Client) FindRoute(ctx context.Context, pickup, dropoff string) (*Route,
 	v := url.Values{}
 	v.Set("pickup", pickup)
 	v.Set("dropoff", dropoff)
-	url := "http://" + c.hostPort + "/route?" + v.Encode()
+	routeURL := "http://" + c.hostPort + "/route?" + v.Encode()
 	var route Route
-	if err := c.client.GetJSON(ctx, "/route", url, &route); err != nil {
+	if err := c.client.GetJSON(ctx, "/route", routeURL, &route); err != nil {
 		c.logger.For(ctx).Error("Error getting route", zap.Error(err))
 		return nil, err
 	}

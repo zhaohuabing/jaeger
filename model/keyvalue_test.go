@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package model_test
 
@@ -20,8 +9,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 )
 
 func TestKeyValueString(t *testing.T) {
@@ -31,7 +21,7 @@ func TestKeyValueString(t *testing.T) {
 	assert.Equal(t, "y", kv.VStr)
 	assert.False(t, kv.Bool())
 	assert.Equal(t, int64(0), kv.Int64())
-	assert.Equal(t, float64(0), kv.Float64())
+	assert.InDelta(t, float64(0), kv.Float64(), 0.01)
 	assert.Nil(t, kv.Binary())
 }
 
@@ -53,7 +43,7 @@ func TestKeyValueFloat64(t *testing.T) {
 	kv := model.Float64("x", 123.345)
 	assert.Equal(t, "x", kv.Key)
 	assert.Equal(t, model.Float64Type, kv.VType)
-	assert.Equal(t, 123.345, kv.Float64())
+	assert.InDelta(t, 123.345, kv.Float64(), 1e-4)
 }
 
 func TestKeyValueBinary(t *testing.T) {
@@ -115,24 +105,25 @@ func TestKeyValueAsStringAndValue(t *testing.T) {
 	expectedBinaryStr := `42656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565730a0942656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565730a0942656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565730a0942656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565730a0942656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f6472696775657320`
 	expectedBinaryStrLossy := `42656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565730a0942656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565732042656e6465722042656e64696e6720526f647269677565730a0942656e6465722042656e64696e6720526f647269677565732042656e64...`
 	testCases := []struct {
+		name     string
 		kv       model.KeyValue
 		str      string
 		strLossy string
-		val      interface{}
+		val      any
 	}{
-		{kv: model.String("x", "Bender is great!"), str: "Bender is great!", val: "Bender is great!"},
-		{kv: model.Bool("x", false), str: "false", val: false},
-		{kv: model.Bool("x", true), str: "true", val: true},
-		{kv: model.Int64("x", 3000), str: "3000", val: int64(3000)},
-		{kv: model.Int64("x", -1947), str: "-1947", val: int64(-1947)},
-		{kv: model.Float64("x", 3.14159265359), str: "3.141592654", val: float64(3.14159265359)},
-		{kv: model.Binary("x", []byte("Bender")), str: "42656e646572", val: []byte("Bender")},
-		{kv: model.Binary("x", []byte(longString)), str: expectedBinaryStr, val: []byte(longString)},
-		{kv: model.Binary("x", []byte(longString)), strLossy: expectedBinaryStrLossy, val: []byte(longString)},
+		{name: "Bender is great!", kv: model.String("x", "Bender is great!"), str: "Bender is great!", val: "Bender is great!"},
+		{name: "false", kv: model.Bool("x", false), str: "false", val: false},
+		{name: "true", kv: model.Bool("x", true), str: "true", val: true},
+		{name: "3000", kv: model.Int64("x", 3000), str: "3000", val: int64(3000)},
+		{name: "-1947", kv: model.Int64("x", -1947), str: "-1947", val: int64(-1947)},
+		{name: "3.141592654", kv: model.Float64("x", 3.14159265359), str: "3.141592654", val: float64(3.14159265359)},
+		{name: "42656e646572", kv: model.Binary("x", []byte("Bender")), str: "42656e646572", val: []byte("Bender")},
+		{name: "binary string", kv: model.Binary("x", []byte(longString)), str: expectedBinaryStr, val: []byte(longString)},
+		{name: "binary string (lossy)", kv: model.Binary("x", []byte(longString)), strLossy: expectedBinaryStrLossy, val: []byte(longString)},
 	}
 	for _, tt := range testCases {
 		testCase := tt // capture loop var
-		t.Run(testCase.str, func(t *testing.T) {
+		t.Run(testCase.name, func(t *testing.T) {
 			if testCase.strLossy != "" {
 				assert.Equal(t, testCase.strLossy, testCase.kv.AsStringLossy())
 			} else {
@@ -144,7 +135,7 @@ func TestKeyValueAsStringAndValue(t *testing.T) {
 	t.Run("invalid type", func(t *testing.T) {
 		kv := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
 		assert.Equal(t, "unknown type -1", kv.AsString())
-		assert.EqualError(t, kv.Value().(error), "unknown type -1")
+		require.EqualError(t, kv.Value().(error), "unknown type -1")
 	})
 }
 
@@ -162,7 +153,7 @@ func TestKeyValueHash(t *testing.T) {
 		testCase := tt // capture loop var
 		t.Run(testCase.kv.String(), func(t *testing.T) {
 			out := new(bytes.Buffer)
-			assert.NoError(t, testCase.kv.Hash(out))
+			require.NoError(t, testCase.kv.Hash(out))
 		})
 	}
 }

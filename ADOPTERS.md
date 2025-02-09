@@ -1,3 +1,5 @@
+* Alauda
+  * Official site: [en](https://www.alauda.io/), [cn](https://www.alauda.cn/)
 * [Base CRM](https://getbase.com/)
 * [Circonus](https://www.circonus.com/)
 * [ContaAzul](https://contaazul.com/)
@@ -12,6 +14,7 @@
 * [Nets](https://www.nets.eu/)
 * PalFish
   * Official site: [en](https://ipalfish.com/klian/web/dist/teacher/home.html), [cn](https://www.ipalfish.com/)
+* [PITS Global Data Recovery Services](https://www.pitsdatarecovery.net/)
 * [Red Hat](https://www.redhat.com/)
   * https://github.com/jaegertracing/jaeger-openshift
   * https://www.hawkular.org/blog/2017/04/19/hawkular-apm-jaeger.html

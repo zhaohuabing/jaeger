@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -19,6 +8,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,16 +24,17 @@ type Agent struct {
 	httpServer *http.Server
 	httpAddr   atomic.Value // string, set once agent starts listening
 	logger     *zap.Logger
+	exitWG     sync.WaitGroup
 }
 
 // NewAgent creates the new Agent.
 func NewAgent(
-	processors []processors.Processor,
+	procs []processors.Processor,
 	httpServer *http.Server,
 	logger *zap.Logger,
 ) *Agent {
 	a := &Agent{
-		processors: processors,
+		processors: procs,
 		httpServer: httpServer,
 		logger:     logger,
 	}
@@ -65,12 +56,14 @@ func (a *Agent) Run() error {
 		return err
 	}
 	a.httpAddr.Store(listener.Addr().String())
+	a.exitWG.Add(1)
 	go func() {
 		a.logger.Info("Starting jaeger-agent HTTP server", zap.Int("http-port", listener.Addr().(*net.TCPAddr).Port))
 		if err := a.httpServer.Serve(listener); err != http.ErrServerClosed {
 			a.logger.Error("http server failure", zap.Error(err))
 		}
 		a.logger.Info("agent's http server exiting")
+		a.exitWG.Done()
 	}()
 	for _, processor := range a.processors {
 		go processor.Serve()
@@ -97,4 +90,5 @@ func (a *Agent) Stop() {
 	for _, processor := range a.processors {
 		processor.Stop()
 	}
+	a.exitWG.Wait()
 }

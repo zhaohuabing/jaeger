@@ -1,32 +1,23 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package query
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	"github.com/jaegertracing/jaeger/model"
-	"github.com/jaegertracing/jaeger/proto-gen/api_v2"
-	"github.com/jaegertracing/jaeger/storage/spanstore"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore"
 )
 
 // Query represents a jaeger-query's query for trace-id
@@ -37,10 +28,7 @@ type Query struct {
 
 // New creates a Query object
 func New(addr string) (*Query, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect with the jaeger-query service: %w", err)
 	}
@@ -54,7 +42,7 @@ func New(addr string) (*Query, error) {
 // unwrapNotFoundErr is a conversion function
 func unwrapNotFoundErr(err error) error {
 	if s, _ := status.FromError(err); s != nil {
-		if s.Message() == spanstore.ErrTraceNotFound.Error() {
+		if strings.Contains(s.Message(), spanstore.ErrTraceNotFound.Error()) {
 			return spanstore.ErrTraceNotFound
 		}
 	}
@@ -62,28 +50,35 @@ func unwrapNotFoundErr(err error) error {
 }
 
 // QueryTrace queries for a trace and returns all spans inside it
-func (q *Query) QueryTrace(traceID string) ([]model.Span, error) {
+func (q *Query) QueryTrace(traceID string, startTime time.Time, endTime time.Time) ([]model.Span, error) {
 	mTraceID, err := model.TraceIDFromString(traceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert the provided trace id: %w", err)
 	}
 
-	stream, err := q.client.GetTrace(context.Background(), &api_v2.GetTraceRequest{
-		TraceID: mTraceID,
-	})
+	request := api_v2.GetTraceRequest{
+		TraceID:   mTraceID,
+		StartTime: startTime,
+		EndTime:   endTime,
+	}
+
+	stream, err := q.client.GetTrace(context.Background(), &request)
 	if err != nil {
 		return nil, unwrapNotFoundErr(err)
 	}
 
 	var spans []model.Span
-	for received, err := stream.Recv(); err != io.EOF; received, err = stream.Recv() {
+	for received, err := stream.Recv(); !errors.Is(err, io.EOF); received, err = stream.Recv() {
 		if err != nil {
 			return nil, unwrapNotFoundErr(err)
 		}
-		for i := range received.Spans {
-			spans = append(spans, received.Spans[i])
-		}
+		spans = append(spans, received.Spans...)
 	}
 
 	return spans, nil
+}
+
+// Close closes the grpc client connection
+func (q *Query) Close() error {
+	return q.conn.Close()
 }

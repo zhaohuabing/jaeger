@@ -1,50 +1,35 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package server
 
 import (
+	"context"
 	"fmt"
 	"net"
-	"time"
 
+	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/confignet"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/handler"
-	"github.com/jaegertracing/jaeger/cmd/collector/app/sampling"
-	"github.com/jaegertracing/jaeger/cmd/collector/app/sampling/strategystore"
-	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
-	"github.com/jaegertracing/jaeger/proto-gen/api_v2"
+	samplinggrpc "github.com/jaegertracing/jaeger/internal/sampling/grpc"
+	"github.com/jaegertracing/jaeger/internal/sampling/samplingstrategy"
+	"github.com/jaegertracing/jaeger/pkg/telemetry"
 )
 
 // GRPCServerParams to construct a new Jaeger Collector gRPC Server
 type GRPCServerParams struct {
-	TLSConfig               tlscfg.Options
-	HostPort                string
-	Handler                 *handler.GRPCHandler
-	SamplingStore           strategystore.StrategyStore
-	Logger                  *zap.Logger
-	OnError                 func(error)
-	MaxReceiveMessageLength int
-	MaxConnectionAge        time.Duration
-	MaxConnectionAgeGrace   time.Duration
+	configgrpc.ServerConfig
+	Handler          *handler.GRPCHandler
+	SamplingProvider samplingstrategy.Provider
+	Logger           *zap.Logger
+	OnError          func(error)
 
 	// Set by the server to indicate the actual host:port of the server.
 	HostPortActual string
@@ -53,31 +38,17 @@ type GRPCServerParams struct {
 // StartGRPCServer based on the given parameters
 func StartGRPCServer(params *GRPCServerParams) (*grpc.Server, error) {
 	var server *grpc.Server
-	var grpcOpts []grpc.ServerOption
-
-	if params.MaxReceiveMessageLength > 0 {
-		grpcOpts = append(grpcOpts, grpc.MaxRecvMsgSize(params.MaxReceiveMessageLength))
+	var grpcOpts []configgrpc.ToServerOption
+	params.NetAddr.Transport = confignet.TransportTypeTCP
+	server, err := params.ToServer(context.Background(), nil,
+		telemetry.NoopSettings().ToOtelComponent(),
+		grpcOpts...)
+	if err != nil {
+		return nil, err
 	}
-	grpcOpts = append(grpcOpts, grpc.KeepaliveParams(keepalive.ServerParameters{
-		MaxConnectionAge:      params.MaxConnectionAge,
-		MaxConnectionAgeGrace: params.MaxConnectionAgeGrace,
-	}))
-
-	if params.TLSConfig.Enabled {
-		// user requested a server with TLS, setup creds
-		tlsCfg, err := params.TLSConfig.Config(params.Logger)
-		if err != nil {
-			return nil, err
-		}
-
-		creds := credentials.NewTLS(tlsCfg)
-		grpcOpts = append(grpcOpts, grpc.Creds(creds))
-	}
-
-	server = grpc.NewServer(grpcOpts...)
 	reflection.Register(server)
 
-	listener, err := net.Listen("tcp", params.HostPort)
+	listener, err := params.NetAddr.Listen(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on gRPC port: %w", err)
 	}
@@ -94,7 +65,7 @@ func serveGRPC(server *grpc.Server, listener net.Listener, params *GRPCServerPar
 	healthServer := health.NewServer()
 
 	api_v2.RegisterCollectorServiceServer(server, params.Handler)
-	api_v2.RegisterSamplingManagerServer(server, sampling.NewGRPCHandler(params.SamplingStore))
+	api_v2.RegisterSamplingManagerServer(server, samplinggrpc.NewHandler(params.SamplingProvider))
 
 	healthServer.SetServingStatus("jaeger.api_v2.CollectorService", grpc_health_v1.HealthCheckResponse_SERVING)
 	healthServer.SetServingStatus("jaeger.api_v2.SamplingManager", grpc_health_v1.HealthCheckResponse_SERVING)

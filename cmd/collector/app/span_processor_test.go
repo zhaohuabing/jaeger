@@ -1,43 +1,53 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gogo/protobuf/jsonpb"
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/atomic"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/confignet"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	otlptrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/jaeger"
+	zc "github.com/jaegertracing/jaeger-idl/thrift-gen/zipkincore"
+	cFlags "github.com/jaegertracing/jaeger/cmd/collector/app/flags"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/handler"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/processor"
-	zipkinSanitizer "github.com/jaegertracing/jaeger/cmd/collector/app/sanitizer/zipkin"
+	zipkinsanitizer "github.com/jaegertracing/jaeger/cmd/collector/app/sanitizer/zipkin"
 	"github.com/jaegertracing/jaeger/internal/metricstest"
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger/internal/storage/v2/api/tracestore/mocks"
+	"github.com/jaegertracing/jaeger/internal/storage/v2/v1adapter"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
 	"github.com/jaegertracing/jaeger/pkg/tenancy"
 	"github.com/jaegertracing/jaeger/pkg/testutils"
-	"github.com/jaegertracing/jaeger/thrift-gen/jaeger"
-	zc "github.com/jaegertracing/jaeger/thrift-gen/zipkincore"
 )
 
 var (
@@ -80,13 +90,14 @@ func TestBySvcMetrics(t *testing.T) {
 		}
 	}
 
-	for _, test := range tests {
+	testFn := func(t *testing.T, test TestCase) {
 		mb := metricstest.NewFactory(time.Hour)
+		defer mb.Backend.Stop()
 		logger := zap.NewNop()
 		serviceMetrics := mb.Namespace(metrics.NSOptions{Name: "service", Tags: nil})
 		hostMetrics := mb.Namespace(metrics.NSOptions{Name: "host", Tags: nil})
-		sp := newSpanProcessor(
-			&fakeSpanWriter{},
+		sp, err := newSpanProcessor(
+			v1adapter.NewTraceWriter(&fakeSpanWriter{}),
 			nil,
 			Options.ServiceMetrics(serviceMetrics),
 			Options.HostMetrics(hostMetrics),
@@ -96,18 +107,20 @@ func TestBySvcMetrics(t *testing.T) {
 			Options.ReportBusy(false),
 			Options.SpanFilter(isSpanAllowed),
 		)
+		require.NoError(t, err)
 		var metricPrefix, format string
 		switch test.format {
 		case processor.ZipkinSpanFormat:
 			span := makeZipkinSpan(test.serviceName, test.rootSpan, test.debug)
-			zHandler := handler.NewZipkinSpanHandler(logger, sp, zipkinSanitizer.NewParentIDSanitizer())
-			zHandler.SubmitZipkinBatch([]*zc.Span{span, span}, handler.SubmitBatchOptions{})
+			sanitizer := zipkinsanitizer.NewChainedSanitizer(zipkinsanitizer.NewStandardSanitizers()...)
+			zHandler := handler.NewZipkinSpanHandler(logger, sp, sanitizer)
+			zHandler.SubmitZipkinBatch(context.Background(), []*zc.Span{span, span}, handler.SubmitBatchOptions{})
 			metricPrefix = "service"
 			format = "zipkin"
 		case processor.JaegerSpanFormat:
 			span, process := makeJaegerSpan(test.serviceName, test.rootSpan, test.debug)
 			jHandler := handler.NewJaegerSpanHandler(logger, sp)
-			jHandler.SubmitBatches([]*jaeger.Batch{
+			jHandler.SubmitBatches(context.Background(), []*jaeger.Batch{
 				{
 					Spans: []*jaeger.Span{
 						span,
@@ -134,11 +147,11 @@ func TestBySvcMetrics(t *testing.T) {
 		if test.rootSpan {
 			if test.debug {
 				expected = append(expected, metricstest.ExpectedMetric{
-					Name: metricPrefix + ".traces.received|debug=true|format=" + format + "|sampler_type=unknown|svc=" + test.serviceName + "|transport=unknown", Value: 2,
+					Name: metricPrefix + ".traces.received|debug=true|format=" + format + "|sampler_type=unrecognized|svc=" + test.serviceName + "|transport=unknown", Value: 2,
 				})
 			} else {
 				expected = append(expected, metricstest.ExpectedMetric{
-					Name: metricPrefix + ".traces.received|debug=false|format=" + format + "|sampler_type=unknown|svc=" + test.serviceName + "|transport=unknown", Value: 2,
+					Name: metricPrefix + ".traces.received|debug=false|format=" + format + "|sampler_type=unrecognized|svc=" + test.serviceName + "|transport=unknown", Value: 2,
 				})
 			}
 		}
@@ -157,6 +170,11 @@ func TestBySvcMetrics(t *testing.T) {
 		}
 		mb.AssertCounterMetrics(t, expected...)
 	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%v", test), func(t *testing.T) {
+			testFn(t, test)
+		})
+	}
 }
 
 func isSpanAllowed(span *model.Span) bool {
@@ -168,6 +186,7 @@ func isSpanAllowed(span *model.Span) bool {
 }
 
 type fakeSpanWriter struct {
+	t         *testing.T
 	spansLock sync.Mutex
 	spans     []*model.Span
 	err       error
@@ -175,6 +194,9 @@ type fakeSpanWriter struct {
 }
 
 func (n *fakeSpanWriter) WriteSpan(ctx context.Context, span *model.Span) error {
+	if n.t != nil {
+		n.t.Logf("Capturing span %+v", span)
+	}
 	n.spansLock.Lock()
 	defer n.spansLock.Unlock()
 	n.spans = append(n.spans, span)
@@ -189,7 +211,7 @@ func (n *fakeSpanWriter) WriteSpan(ctx context.Context, span *model.Span) error 
 	return n.err
 }
 
-func (n *fakeSpanWriter) Close() error {
+func (*fakeSpanWriter) Close() error {
 	return nil
 }
 
@@ -237,14 +259,20 @@ func makeJaegerSpan(service string, rootSpan bool, debugEnabled bool) (*jaeger.S
 
 func TestSpanProcessor(t *testing.T) {
 	w := &fakeSpanWriter{}
-	p := NewSpanProcessor(w, nil, Options.QueueSize(1)).(*spanProcessor)
+	p, err := NewSpanProcessor(v1adapter.NewTraceWriter(w), nil, Options.QueueSize(1))
+	require.NoError(t, err)
 
 	res, err := p.ProcessSpans(
-		[]*model.Span{{}}, // empty span should be enriched by sanitizers
-		processor.SpansOptions{SpanFormat: processor.JaegerSpanFormat})
-	assert.NoError(t, err)
+		context.Background(),
+		processor.SpansV1{
+			Spans: []*model.Span{{}}, // empty span should be enriched by sanitizers
+			Details: processor.Details{
+				SpanFormat: processor.JaegerSpanFormat,
+			},
+		})
+	require.NoError(t, err)
 	assert.Equal(t, []bool{true}, res)
-	assert.NoError(t, p.Close())
+	require.NoError(t, p.Close())
 	assert.Len(t, w.spans, 1)
 	assert.NotNil(t, w.spans[0].Process)
 	assert.NotEmpty(t, w.spans[0].Process.ServiceName)
@@ -253,28 +281,37 @@ func TestSpanProcessor(t *testing.T) {
 func TestSpanProcessorErrors(t *testing.T) {
 	logger, logBuf := testutils.NewLogger()
 	w := &fakeSpanWriter{
-		err: fmt.Errorf("some-error"),
+		err: errors.New("some-error"),
 	}
 	mb := metricstest.NewFactory(time.Hour)
+	defer mb.Backend.Stop()
 	serviceMetrics := mb.Namespace(metrics.NSOptions{Name: "service", Tags: nil})
-	p := NewSpanProcessor(w,
+	pp, err := NewSpanProcessor(
+		v1adapter.NewTraceWriter(w),
 		nil,
 		Options.Logger(logger),
 		Options.ServiceMetrics(serviceMetrics),
 		Options.QueueSize(1),
-	).(*spanProcessor)
+	)
+	require.NoError(t, err)
+	p := pp.(*spanProcessor)
 
-	res, err := p.ProcessSpans([]*model.Span{
-		{
-			Process: &model.Process{
-				ServiceName: "x",
+	res, err := p.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: []*model.Span{
+			{
+				Process: &model.Process{
+					ServiceName: "x",
+				},
 			},
 		},
-	}, processor.SpansOptions{SpanFormat: processor.JaegerSpanFormat})
-	assert.NoError(t, err)
+		Details: processor.Details{
+			SpanFormat: processor.JaegerSpanFormat,
+		},
+	})
+	require.NoError(t, err)
 	assert.Equal(t, []bool{true}, res)
 
-	assert.NoError(t, p.Close())
+	require.NoError(t, p.Close())
 
 	assert.Equal(t, map[string]string{
 		"level": "error",
@@ -290,58 +327,72 @@ func TestSpanProcessorErrors(t *testing.T) {
 
 type blockingWriter struct {
 	sync.Mutex
+	inWriteSpan atomic.Int32
 }
 
-func (w *blockingWriter) WriteSpan(ctx context.Context, span *model.Span) error {
+func (w *blockingWriter) WriteSpan(context.Context, *model.Span) error {
+	w.inWriteSpan.Add(1)
 	w.Lock()
 	defer w.Unlock()
+	w.inWriteSpan.Add(-1)
 	return nil
 }
 
 func TestSpanProcessorBusy(t *testing.T) {
 	w := &blockingWriter{}
-	p := NewSpanProcessor(w,
+	pp, err := NewSpanProcessor(
+		v1adapter.NewTraceWriter(w),
 		nil,
 		Options.NumWorkers(1),
 		Options.QueueSize(1),
 		Options.ReportBusy(true),
-	).(*spanProcessor)
-	defer assert.NoError(t, p.Close())
+	)
+	require.NoError(t, err)
+	p := pp.(*spanProcessor)
+	defer require.NoError(t, p.Close())
 
 	// block the writer so that the first span is read from the queue and blocks the processor,
 	// and either the second or the third span is rejected since the queue capacity is just 1.
 	w.Lock()
 	defer w.Unlock()
 
-	res, err := p.ProcessSpans([]*model.Span{
-		{
-			Process: &model.Process{
-				ServiceName: "x",
+	res, err := p.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: []*model.Span{
+			{
+				Process: &model.Process{
+					ServiceName: "x",
+				},
+			},
+			{
+				Process: &model.Process{
+					ServiceName: "x",
+				},
+			},
+			{
+				Process: &model.Process{
+					ServiceName: "x",
+				},
 			},
 		},
-		{
-			Process: &model.Process{
-				ServiceName: "x",
-			},
+		Details: processor.Details{
+			SpanFormat: processor.JaegerSpanFormat,
 		},
-		{
-			Process: &model.Process{
-				ServiceName: "x",
-			},
-		},
-	}, processor.SpansOptions{SpanFormat: processor.JaegerSpanFormat})
+	})
 
-	assert.Error(t, err, "expcting busy error")
+	require.Error(t, err, "expecting busy error")
 	assert.Nil(t, res)
 }
 
 func TestSpanProcessorWithNilProcess(t *testing.T) {
 	mb := metricstest.NewFactory(time.Hour)
+	defer mb.Backend.Stop()
 	serviceMetrics := mb.Namespace(metrics.NSOptions{Name: "service", Tags: nil})
 
 	w := &fakeSpanWriter{}
-	p := NewSpanProcessor(w, nil, Options.ServiceMetrics(serviceMetrics)).(*spanProcessor)
-	defer assert.NoError(t, p.Close())
+	pp, err := NewSpanProcessor(v1adapter.NewTraceWriter(w), nil, Options.ServiceMetrics(serviceMetrics))
+	require.NoError(t, err)
+	p := pp.(*spanProcessor)
+	defer require.NoError(t, p.Close())
 
 	p.saveSpan(&model.Span{}, "")
 
@@ -352,51 +403,84 @@ func TestSpanProcessorWithNilProcess(t *testing.T) {
 }
 
 func TestSpanProcessorWithCollectorTags(t *testing.T) {
-	testCollectorTags := map[string]string{
-		"extra": "tag",
-		"env":   "prod",
-		"node":  "172.22.18.161",
-	}
+	for _, modelVersion := range []string{"v1", "v2"} {
+		t.Run(modelVersion, func(t *testing.T) {
+			testCollectorTags := map[string]string{
+				"extra": "tag",
+				"env":   "prod",
+				"node":  "172.22.18.161",
+			}
 
-	w := &fakeSpanWriter{}
-	p := NewSpanProcessor(w, nil, Options.CollectorTags(testCollectorTags)).(*spanProcessor)
+			w := &fakeSpanWriter{}
 
-	defer assert.NoError(t, p.Close())
-	span := &model.Span{
-		Process: model.NewProcess("unit-test-service", []model.KeyValue{
-			{
-				Key:  "env",
-				VStr: "prod",
-			},
-			{
-				Key:  "node",
-				VStr: "k8s-test-node-01",
-			},
-		}),
-	}
-	p.addCollectorTags(span)
-	expected := &model.Span{
-		Process: model.NewProcess("unit-test-service", []model.KeyValue{
-			{
-				Key:  "env",
-				VStr: "prod",
-			},
-			{
-				Key:  "extra",
-				VStr: "tag",
-			},
-			{
-				Key:  "node",
-				VStr: "172.22.18.161",
-			},
-			{
-				Key:  "node",
-				VStr: "k8s-test-node-01",
-			},
-		}),
-	}
+			pp, err := NewSpanProcessor(
+				v1adapter.NewTraceWriter(w),
+				nil,
+				Options.CollectorTags(testCollectorTags),
+				Options.NumWorkers(1),
+				Options.QueueSize(1),
+			)
+			require.NoError(t, err)
+			p := pp.(*spanProcessor)
+			t.Cleanup(func() {
+				require.NoError(t, p.Close())
+			})
 
-	assert.Equal(t, expected.Process, span.Process)
+			span := &model.Span{
+				Process: model.NewProcess("unit-test-service", []model.KeyValue{
+					model.String("env", "prod"),
+					model.String("node", "k8s-test-node-01"),
+				}),
+			}
+
+			var batch processor.Batch
+			if modelVersion == "v2" {
+				batch = processor.SpansV2{
+					Traces: v1adapter.V1BatchesToTraces([]*model.Batch{{Spans: []*model.Span{span}}}),
+				}
+			} else {
+				batch = processor.SpansV1{
+					Spans: []*model.Span{span},
+				}
+			}
+			_, err = p.ProcessSpans(context.Background(), batch)
+			require.NoError(t, err)
+
+			require.Eventually(t, func() bool {
+				w.spansLock.Lock()
+				defer w.spansLock.Unlock()
+				return len(w.spans) > 0
+			}, time.Second, time.Millisecond)
+
+			w.spansLock.Lock()
+			defer w.spansLock.Unlock()
+			span = w.spans[0]
+
+			expected := &model.Span{
+				Process: model.NewProcess("unit-test-service", []model.KeyValue{
+					model.String("env", "prod"),
+					model.String("extra", "tag"),
+					model.String("node", "172.22.18.161"),
+					model.String("node", "k8s-test-node-01"),
+				}),
+			}
+			if modelVersion == "v2" {
+				// ptrace.Resource.Attributes do not allow duplicate keys,
+				// so we only add non-conflicting tags, meaning the node IP
+				// tag from the collectorTags will not be added.
+				expected.Process.Tags = slices.Delete(expected.Process.Tags, 2, 3)
+				typedTags := model.KeyValues(span.Process.Tags)
+				typedTags.Sort()
+			}
+
+			m := &jsonpb.Marshaler{Indent: "  "}
+			jsonActual := new(bytes.Buffer)
+			m.Marshal(jsonActual, span.Process)
+			jsonExpected := new(bytes.Buffer)
+			m.Marshal(jsonExpected, expected.Process)
+			assert.Equal(t, jsonExpected.String(), jsonActual.String())
+		})
+	}
 }
 
 func TestSpanProcessorCountSpan(t *testing.T) {
@@ -433,25 +517,38 @@ func TestSpanProcessorCountSpan(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, func(_ *testing.T) {
 			mb := metricstest.NewFactory(time.Hour)
+			defer mb.Backend.Stop()
 			m := mb.Namespace(metrics.NSOptions{})
 
 			w := &fakeSpanWriter{}
-			opts := []Option{Options.HostMetrics(m), Options.SpanSizeMetricsEnabled(tt.enableSpanMetrics)}
+			opts := []Option{
+				Options.HostMetrics(m),
+				Options.SpanSizeMetricsEnabled(tt.enableSpanMetrics),
+			}
 			if tt.enableDynQueueSizeMem {
 				opts = append(opts, Options.DynQueueSizeMemory(1000))
 			} else {
 				opts = append(opts, Options.DynQueueSizeMemory(0))
 			}
-			p := NewSpanProcessor(w, nil, opts...).(*spanProcessor)
+			pp, err := NewSpanProcessor(v1adapter.NewTraceWriter(w), nil, opts...)
+			require.NoError(t, err)
+			p := pp.(*spanProcessor)
 			defer func() {
-				assert.NoError(t, p.Close())
+				require.NoError(t, p.Close())
 			}()
 			p.background(10*time.Millisecond, p.updateGauges)
 
 			p.processSpan(&model.Span{}, "")
-			assert.NotEqual(t, uint64(0), p.bytesProcessed)
+			if tt.enableSpanMetrics {
+				assert.Eventually(t,
+					func() bool { return p.spansProcessed.Load() > 0 },
+					time.Second,
+					time.Millisecond,
+				)
+				assert.Positive(t, p.spansProcessed.Load())
+			}
 
 			for i := 0; i < 10000; i++ {
 				_, g := mb.Snapshot()
@@ -550,11 +647,12 @@ func TestUpdateDynQueueSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := &fakeSpanWriter{}
-			p := newSpanProcessor(w, nil, Options.QueueSize(tt.initialCapacity), Options.DynQueueSizeWarmup(tt.warmup), Options.DynQueueSizeMemory(tt.sizeInBytes))
+			p, err := newSpanProcessor(v1adapter.NewTraceWriter(w), nil, Options.QueueSize(tt.initialCapacity), Options.DynQueueSizeWarmup(tt.warmup), Options.DynQueueSizeMemory(tt.sizeInBytes))
+			require.NoError(t, err)
 			assert.EqualValues(t, tt.initialCapacity, p.queue.Capacity())
 
-			p.spansProcessed = atomic.NewUint64(tt.spansProcessed)
-			p.bytesProcessed = atomic.NewUint64(tt.bytesProcessed)
+			p.spansProcessed.Store(tt.spansProcessed)
+			p.bytesProcessed.Store(tt.bytesProcessed)
 
 			p.updateQueueSize()
 			assert.EqualValues(t, tt.expectedCapacity, p.queue.Capacity())
@@ -564,18 +662,21 @@ func TestUpdateDynQueueSize(t *testing.T) {
 
 func TestUpdateQueueSizeNoActivityYet(t *testing.T) {
 	w := &fakeSpanWriter{}
-	p := newSpanProcessor(w, nil, Options.QueueSize(1), Options.DynQueueSizeWarmup(1), Options.DynQueueSizeMemory(1))
+	p, err := newSpanProcessor(v1adapter.NewTraceWriter(w), nil, Options.QueueSize(1), Options.DynQueueSizeWarmup(1), Options.DynQueueSizeMemory(1))
+	require.NoError(t, err)
 	assert.NotPanics(t, p.updateQueueSize)
 }
 
 func TestStartDynQueueSizeUpdater(t *testing.T) {
 	w := &fakeSpanWriter{}
 	oneGiB := uint(1024 * 1024 * 1024)
-	p := newSpanProcessor(w, nil, Options.QueueSize(100), Options.DynQueueSizeWarmup(1000), Options.DynQueueSizeMemory(oneGiB))
+
+	p, err := newSpanProcessor(v1adapter.NewTraceWriter(w), nil, Options.QueueSize(100), Options.DynQueueSizeWarmup(1000), Options.DynQueueSizeMemory(oneGiB))
+	require.NoError(t, err)
 	assert.EqualValues(t, 100, p.queue.Capacity())
 
-	p.spansProcessed = atomic.NewUint64(1000)
-	p.bytesProcessed = atomic.NewUint64(10 * 1024 * p.spansProcessed.Load()) // 10KiB per span
+	p.spansProcessed.Store(1000)
+	p.bytesProcessed.Store(10 * 1024 * p.spansProcessed.Load()) // 10KiB per span
 
 	// 1024 ^ 3 / (10 * 1024) = 104857,6
 	// ideal queue size = 104857
@@ -583,72 +684,351 @@ func TestStartDynQueueSizeUpdater(t *testing.T) {
 
 	// we wait up to 50 milliseconds
 	for i := 0; i < 5; i++ {
-		if p.queue.Capacity() == 100 {
-			time.Sleep(10 * time.Millisecond)
-		} else {
+		if p.queue.Capacity() != 100 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	assert.EqualValues(t, 104857, p.queue.Capacity())
+	require.NoError(t, p.Close())
 }
 
 func TestAdditionalProcessors(t *testing.T) {
 	w := &fakeSpanWriter{}
 
 	// nil doesn't fail
-	p := NewSpanProcessor(w, nil, Options.QueueSize(1))
-	res, err := p.ProcessSpans([]*model.Span{
-		{
-			Process: &model.Process{
-				ServiceName: "x",
+	p, err := NewSpanProcessor(v1adapter.NewTraceWriter(w), nil, Options.QueueSize(1))
+	require.NoError(t, err)
+	res, err := p.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: []*model.Span{
+			{
+				Process: &model.Process{
+					ServiceName: "x",
+				},
 			},
 		},
-	}, processor.SpansOptions{SpanFormat: processor.JaegerSpanFormat})
-	assert.NoError(t, err)
+		Details: processor.Details{
+			SpanFormat: processor.JaegerSpanFormat,
+		},
+	})
+	require.NoError(t, err)
 	assert.Equal(t, []bool{true}, res)
-	assert.NoError(t, p.Close())
+	require.NoError(t, p.Close())
 
 	// additional processor is called
 	count := 0
-	f := func(s *model.Span, t string) {
+	f := func(_ *model.Span, _ string) {
 		count++
 	}
-	p = NewSpanProcessor(w, []ProcessSpan{f}, Options.QueueSize(1))
-	res, err = p.ProcessSpans([]*model.Span{
-		{
-			Process: &model.Process{
-				ServiceName: "x",
+	p, err = NewSpanProcessor(v1adapter.NewTraceWriter(w), []ProcessSpan{f}, Options.QueueSize(1))
+	require.NoError(t, err)
+	res, err = p.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: []*model.Span{
+			{
+				Process: &model.Process{
+					ServiceName: "x",
+				},
 			},
 		},
-	}, processor.SpansOptions{SpanFormat: processor.JaegerSpanFormat})
-	assert.NoError(t, err)
+		Details: processor.Details{
+			SpanFormat: processor.JaegerSpanFormat,
+		},
+	})
+	require.NoError(t, err)
 	assert.Equal(t, []bool{true}, res)
-	assert.NoError(t, p.Close())
+	require.NoError(t, p.Close())
 	assert.Equal(t, 1, count)
 }
 
 func TestSpanProcessorContextPropagation(t *testing.T) {
 	w := &fakeSpanWriter{}
-	p := NewSpanProcessor(w, nil, Options.QueueSize(1))
+	p, err := NewSpanProcessor(v1adapter.NewTraceWriter(w), nil, Options.QueueSize(1))
+	require.NoError(t, err)
 
 	dummyTenant := "context-prop-test-tenant"
 
-	res, err := p.ProcessSpans([]*model.Span{
-		{
-			Process: &model.Process{
-				ServiceName: "x",
+	res, err := p.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: []*model.Span{
+			{
+				Process: &model.Process{
+					ServiceName: "x",
+				},
 			},
 		},
-	}, processor.SpansOptions{
-		Tenant: dummyTenant,
+		Details: processor.Details{
+			Tenant: dummyTenant,
+		},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, []bool{true}, res)
-	assert.NoError(t, p.Close())
+	require.NoError(t, p.Close())
 
 	// Verify that the dummy tenant from SpansOptions context made it to writer
-	assert.Equal(t, true, w.tenants[dummyTenant])
+	assert.True(t, w.tenants[dummyTenant])
 	// Verify no other tenantKey context values made it to writer
 	assert.True(t, reflect.DeepEqual(w.tenants, map[string]bool{dummyTenant: true}))
+}
+
+func TestSpanProcessorWithOnDroppedSpanOption(t *testing.T) {
+	var droppedOperations []string
+	customOnDroppedSpan := func(span *model.Span) {
+		droppedOperations = append(droppedOperations, span.OperationName)
+	}
+
+	w := &blockingWriter{}
+	pp, err := NewSpanProcessor(
+		v1adapter.NewTraceWriter(w),
+		nil,
+		Options.NumWorkers(1),
+		Options.QueueSize(1),
+		Options.OnDroppedSpan(customOnDroppedSpan),
+		Options.ReportBusy(true),
+	)
+	require.NoError(t, err)
+	p := pp.(*spanProcessor)
+	defer p.Close()
+
+	// Acquire the lock externally to force the writer to block.
+	w.Lock()
+	defer w.Unlock()
+
+	_, err = p.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: []*model.Span{
+			{OperationName: "op1"},
+		},
+		Details: processor.Details{
+			SpanFormat: processor.JaegerSpanFormat,
+		},
+	})
+	require.NoError(t, err)
+
+	// Wait for the sole worker to pick the item from the queue and block
+	assert.Eventually(t,
+		func() bool { return w.inWriteSpan.Load() == 1 },
+		time.Second, time.Microsecond)
+
+	// Now the queue is empty again and can accept one more item, but no workers available.
+	// If we send two items, the last one will have to be dropped.
+	_, err = p.ProcessSpans(context.Background(), processor.SpansV1{
+		Spans: []*model.Span{
+			{OperationName: "op2"},
+			{OperationName: "op3"},
+		},
+		Details: processor.Details{
+			SpanFormat: processor.JaegerSpanFormat,
+		},
+	})
+	require.EqualError(t, err, processor.ErrBusy.Error())
+	assert.Equal(t, []string{"op3"}, droppedOperations)
+}
+
+func optionsWithPorts(portHttp string, portGrpc string) *cFlags.CollectorOptions {
+	opts := &cFlags.CollectorOptions{
+		OTLP: struct {
+			Enabled bool
+			GRPC    configgrpc.ServerConfig
+			HTTP    confighttp.ServerConfig
+		}{
+			Enabled: true,
+			HTTP: confighttp.ServerConfig{
+				Endpoint:        portHttp,
+				IncludeMetadata: true,
+			},
+			GRPC: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint:  portGrpc,
+					Transport: confignet.TransportTypeTCP,
+				},
+			},
+		},
+	}
+	return opts
+}
+
+func TestOTLPReceiverWithV2Storage(t *testing.T) {
+	tests := []struct {
+		name           string
+		requestType    string
+		tenant         string
+		expectedTenant string
+		expectedError  bool
+		executeRequest func(ctx context.Context, url string, tenant string) error
+	}{
+		{
+			name:           "Valid tenant via HTTP",
+			requestType:    "http",
+			tenant:         "test-tenant",
+			expectedTenant: "test-tenant",
+			expectedError:  false,
+			executeRequest: sendHTTPRequest,
+		},
+		{
+			name:           "Invalid tenant via HTTP",
+			requestType:    "http",
+			tenant:         "invalid-tenant",
+			expectedTenant: "",
+			expectedError:  true,
+			executeRequest: sendHTTPRequest,
+		},
+		{
+			name:           "Valid tenant via gRPC",
+			requestType:    "grpc",
+			tenant:         "test-tenant",
+			expectedTenant: "test-tenant",
+			expectedError:  false,
+			executeRequest: sendGRPCRequest,
+		},
+		{
+			name:           "Invalid tenant via gRPC",
+			requestType:    "grpc",
+			tenant:         "invalid-tenant",
+			expectedTenant: "",
+			expectedError:  true,
+			executeRequest: sendGRPCRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockWriter := mocks.NewWriter(t)
+
+			spanProcessor, err := NewSpanProcessor(
+				mockWriter,
+				nil,
+				Options.NumWorkers(1),
+				Options.QueueSize(1),
+				Options.ReportBusy(true),
+			)
+			require.NoError(t, err)
+			defer spanProcessor.Close()
+			logger := zaptest.NewLogger(t)
+
+			portHttp := "4317"
+			portGrpc := "4318"
+
+			var receivedTraces atomic.Pointer[ptrace.Traces]
+			var receivedCtx atomic.Pointer[context.Context]
+			if !tt.expectedError {
+				mockWriter.On("WriteTraces", mock.Anything, mock.Anything).
+					Run(func(args mock.Arguments) {
+						storeContext := args.Get(0).(context.Context)
+						storeTrace := args.Get(1).(ptrace.Traces)
+						receivedTraces.Store(&storeTrace)
+						receivedCtx.Store(&storeContext)
+					}).Return(nil)
+			}
+
+			tenancyMgr := tenancy.NewManager(&tenancy.Options{
+				Enabled: true,
+				Header:  "x-tenant",
+				Tenants: []string{"test-tenant"},
+			})
+
+			rec, err := handler.StartOTLPReceiver(
+				optionsWithPorts(fmt.Sprintf("localhost:%v", portHttp), fmt.Sprintf("localhost:%v", portGrpc)),
+				logger,
+				spanProcessor,
+				tenancyMgr,
+			)
+			require.NoError(t, err)
+			ctx := context.Background()
+			defer rec.Shutdown(ctx)
+
+			var url string
+			if tt.requestType == "http" {
+				url = fmt.Sprintf("http://localhost:%v/v1/traces", portHttp)
+			} else {
+				url = fmt.Sprintf("localhost:%v", portGrpc)
+			}
+			err = tt.executeRequest(ctx, url, tt.tenant)
+			if tt.expectedError {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			assert.Eventually(t, func() bool {
+				storedTraces := receivedTraces.Load()
+				storedCtx := receivedCtx.Load()
+				if storedTraces == nil || storedCtx == nil {
+					return false
+				}
+				receivedSpan := storedTraces.ResourceSpans().At(0).
+					ScopeSpans().At(0).
+					Spans().At(0)
+				receivedTenant := tenancy.GetTenant(*storedCtx)
+				return receivedSpan.Name() == "test-trace" && receivedTenant == tt.expectedTenant
+			}, 1*time.Second, 100*time.Millisecond)
+
+			mockWriter.AssertExpectations(t)
+		})
+	}
+}
+
+// Helper function to send HTTP request
+func sendHTTPRequest(ctx context.Context, url string, tenant string) error {
+	traceJSON := `{
+		"resourceSpans": [{
+			"scopeSpans": [{
+				"spans": [{
+					"name": "test-trace"
+				}]
+			}]
+		}]
+	}`
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(traceJSON))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-tenant", tenant)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// Helper function to send gRPC request
+func sendGRPCRequest(ctx context.Context, url string, tenant string) error {
+	conn, err := grpc.NewClient(
+		url,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	md := metadata.New(map[string]string{
+		"x-tenant": tenant,
+	})
+	ctxWithMD := metadata.NewOutgoingContext(ctx, md)
+
+	client := otlptrace.NewTraceServiceClient(conn)
+	req := &otlptrace.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			{
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{
+						Spans: []*tracepb.Span{
+							{
+								Name: "test-trace",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err = client.Export(ctxWithMD, req)
+	return err
 }

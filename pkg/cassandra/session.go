@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package cassandra
 
@@ -41,7 +30,7 @@ const (
 
 // Session is an abstraction of gocql.Session
 type Session interface {
-	Query(stmt string, values ...interface{}) Query
+	Query(stmt string, values ...any) Query
 	Close()
 }
 
@@ -54,20 +43,20 @@ type UpdateQuery interface {
 	// statement containing an IF clause). If the transaction fails because
 	// the existing values did not match, the previous values will be stored
 	// in dest.
-	ScanCAS(dest ...interface{}) (bool, error)
+	ScanCAS(dest ...any) (bool, error)
 }
 
 // Query is an abstraction of gocql.Query
 type Query interface {
 	UpdateQuery
 	Iter() Iterator
-	Bind(v ...interface{}) Query
+	Bind(v ...any) Query
 	Consistency(level Consistency) Query
 	PageSize(int) Query
 }
 
 // Iterator is an abstraction of gocql.Iter
 type Iterator interface {
-	Scan(dest ...interface{}) bool
+	Scan(dest ...any) bool
 	Close() error
 }

@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metrics
 
@@ -21,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaegertracing/jaeger/internal/metricstest"
 	"github.com/jaegertracing/jaeger/pkg/testutils"
@@ -121,10 +111,10 @@ func TestTableExec(t *testing.T) {
 		}
 		err := tm.Exec(tc.q, useLogger)
 		if tc.q.err == nil {
-			assert.NoError(t, err)
-			assert.Len(t, logBuf.Bytes(), 0)
+			require.NoError(t, err)
+			assert.Empty(t, logBuf.Bytes())
 		} else {
-			assert.Error(t, err, tc.q.err.Error())
+			require.Error(t, err, tc.q.err.Error())
 			if tc.log {
 				assert.Equal(t, map[string]string{
 					"level": "error",
@@ -133,7 +123,7 @@ func TestTableExec(t *testing.T) {
 					"error": "failed",
 				}, logBuf.JSONLine(0))
 			} else {
-				assert.Len(t, logBuf.Bytes(), 0)
+				assert.Empty(t, logBuf.Bytes())
 			}
 		}
 		counts, _ := mf.Snapshot()
@@ -154,6 +144,10 @@ func (q insertQuery) String() string {
 	return q.str
 }
 
-func (q insertQuery) ScanCAS(dest ...interface{}) (bool, error) {
+func (insertQuery) ScanCAS(...any /* dest */) (bool, error) {
 	return true, nil
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

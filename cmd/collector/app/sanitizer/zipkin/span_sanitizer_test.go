@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package zipkin
 
@@ -20,7 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/jaegertracing/jaeger/thrift-gen/zipkincore"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/zipkincore"
+	"github.com/jaegertracing/jaeger/pkg/testutils"
 )
 
 var (
@@ -28,7 +18,7 @@ var (
 	positiveDuration = int64(1)
 )
 
-func TestNewStandardSanitizers(t *testing.T) {
+func TestNewStandardSanitizers(*testing.T) {
 	NewStandardSanitizers()
 }
 
@@ -53,7 +43,7 @@ func TestSpanDurationSanitizer(t *testing.T) {
 	span = &zipkincore.Span{Duration: &positiveDuration}
 	actual = sanitizer.Sanitize(span)
 	assert.Equal(t, positiveDuration, *actual.Duration)
-	assert.Len(t, actual.BinaryAnnotations, 0)
+	assert.Empty(t, actual.BinaryAnnotations)
 
 	sanitizer = NewSpanDurationSanitizer()
 	nilDurationSpan := &zipkincore.Span{}
@@ -109,7 +99,7 @@ func TestSpanParentIDSanitizer(t *testing.T) {
 				assert.Equal(t, zeroParentIDTag, string(actual.BinaryAnnotations[0].Key))
 			}
 		} else {
-			assert.Len(t, actual.BinaryAnnotations, 0)
+			assert.Empty(t, actual.BinaryAnnotations)
 		}
 	}
 }
@@ -158,12 +148,12 @@ func TestSpanErrorSanitizer(t *testing.T) {
 			assert.Equal(t, zipkincore.AnnotationType_BOOL, sanitized.BinaryAnnotations[0].AnnotationType)
 
 			if test.addErrMsgAnno {
-				assert.Equal(t, 2, len(sanitized.BinaryAnnotations))
+				assert.Len(t, sanitized.BinaryAnnotations, 2)
 				assert.Equal(t, "error.message", sanitized.BinaryAnnotations[1].Key)
 				assert.Equal(t, "message", string(sanitized.BinaryAnnotations[1].Value))
 				assert.Equal(t, zipkincore.AnnotationType_STRING, sanitized.BinaryAnnotations[1].AnnotationType)
 			} else {
-				assert.Equal(t, 1, len(sanitized.BinaryAnnotations))
+				assert.Len(t, sanitized.BinaryAnnotations, 1)
 			}
 		}
 	}
@@ -199,4 +189,8 @@ func TestSpanStartTimeSanitizer(t *testing.T) {
 	}
 	sanitized = sanitizer.Sanitize(span)
 	assert.Equal(t, int64(20), *sanitized.Timestamp)
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

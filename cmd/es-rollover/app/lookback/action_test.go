@@ -1,16 +1,5 @@
 // Copyright (c) 2021 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package lookback
 
@@ -20,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger/cmd/es-rollover/app"
@@ -75,13 +65,13 @@ func TestLookBackAction(t *testing.T) {
 
 	tests := []struct {
 		name                  string
-		setupCallExpectations func(indexClient *mocks.MockIndexAPI)
+		setupCallExpectations func(indexClient *mocks.IndexAPI)
 		config                Config
 		expectedErr           error
 	}{
 		{
 			name: "success",
-			setupCallExpectations: func(indexClient *mocks.MockIndexAPI) {
+			setupCallExpectations: func(indexClient *mocks.IndexAPI) {
 				indexClient.On("GetJaegerIndices", "").Return(indices, nil)
 				indexClient.On("DeleteAlias", []client.Alias{
 					{
@@ -102,7 +92,7 @@ func TestLookBackAction(t *testing.T) {
 		},
 		{
 			name: "get indices error",
-			setupCallExpectations: func(indexClient *mocks.MockIndexAPI) {
+			setupCallExpectations: func(indexClient *mocks.IndexAPI) {
 				indexClient.On("GetJaegerIndices", "").Return(indices, errors.New("get indices error"))
 			},
 			config: Config{
@@ -117,7 +107,7 @@ func TestLookBackAction(t *testing.T) {
 		},
 		{
 			name: "empty indices",
-			setupCallExpectations: func(indexClient *mocks.MockIndexAPI) {
+			setupCallExpectations: func(indexClient *mocks.IndexAPI) {
 				indexClient.On("GetJaegerIndices", "").Return([]client.Index{}, nil)
 			},
 			config: Config{
@@ -136,7 +126,7 @@ func TestLookBackAction(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			indexClient := &mocks.MockIndexAPI{}
+			indexClient := &mocks.IndexAPI{}
 			lookbackAction := Action{
 				Config:        test.config,
 				IndicesClient: indexClient,
@@ -147,7 +137,7 @@ func TestLookBackAction(t *testing.T) {
 
 			err := lookbackAction.Do()
 			if test.expectedErr != nil {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Equal(t, test.expectedErr, err)
 			}
 		})

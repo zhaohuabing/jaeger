@@ -1,83 +1,151 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-//go:build integration
-// +build integration
+// SPDX-License-Identifier: Apache-2.0
 
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/grpc-ecosystem/grpc-gateway/runtime"
+	"github.com/gogo/protobuf/jsonpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
 	ui "github.com/jaegertracing/jaeger/model/json"
-	"github.com/jaegertracing/jaeger/proto-gen/api_v3"
-	"github.com/jaegertracing/jaeger/thrift-gen/sampling"
+	"github.com/jaegertracing/jaeger/ports"
 )
+
+// These tests are only run when the environment variable TEST_MODE=integration is set.
 
 const (
-	host          = "0.0.0.0"
-	queryPort     = "16686"
-	agentPort     = "5778"
-	queryHostPort = host + ":" + queryPort
-	queryURL      = "http://" + queryHostPort
-	agentHostPort = host + ":" + agentPort
-	agentURL      = "http://" + agentHostPort
+	host = "0.0.0.0"
 
-	getServicesURL         = queryURL + "/api/services"
-	getTraceURL            = queryURL + "/api/traces?service=jaeger-query&tag=jaeger-debug-id:debug"
-	getSamplingStrategyURL = agentURL + "/sampling?service=whatever"
-
-	getServicesAPIV3URL = queryURL + "/api/v3/services"
+	getServicesURL         = "/api/services"
+	getTraceURL            = "/api/traces/"
+	getServicesAPIV3URL    = "/api/v3/services"
+	getSamplingStrategyURL = "/api/sampling?service=whatever"
 )
+
+var (
+	queryAddr    = fmt.Sprintf("http://%s:%d", host, ports.QueryHTTP)
+	samplingAddr = fmt.Sprintf("http://%s:%d", host, ports.CollectorHTTP)
+	healthAddr   = fmt.Sprintf("http://%s:%d/status", host, ports.CollectorV2HealthChecks)
+)
+
+var traceID string // stores state exchanged between createTrace and getAPITrace
 
 var httpClient = &http.Client{
 	Timeout: time.Second,
 }
 
 func TestAllInOne(t *testing.T) {
+	if os.Getenv("TEST_MODE") != "integration" {
+		t.Skip("Integration test for all-in-one skipped; set environment variable TEST_MODE=integration to enable")
+	}
+
 	// Check if the query service is available
-	if err := healthCheck(); err != nil {
-		t.Fatal(err)
-	}
-	// Check if the favicon icon is available
-	if err := faviconCheck(); err != nil {
-		t.Fatal(err)
-	}
-	createTrace(t)
-	getAPITrace(t)
-	getSamplingStrategy(t)
-	getServicesAPIV3(t)
+	healthCheck(t)
+
+	t.Run("healthCheckV2", healthCheckV2)
+	t.Run("checkWebUI", checkWebUI)
+	t.Run("createTrace", createTrace)
+	t.Run("getAPITrace", getAPITrace)
+	t.Run("getSamplingStrategy", getSamplingStrategy)
+	t.Run("getServicesAPIV3", getServicesAPIV3)
 }
 
-func createTrace(t *testing.T) {
-	req, err := http.NewRequest("GET", getServicesURL, nil)
+func healthCheck(t *testing.T) {
+	require.Eventuallyf(t,
+		func() bool {
+			resp, err := http.Get(queryAddr + "/")
+			if err == nil {
+				resp.Body.Close()
+			}
+			return err == nil
+		},
+		10*time.Second,
+		time.Second,
+		"expecting query endpoint to be healthy",
+	)
+	t.Logf("Server detected at %s", queryAddr)
+}
+
+func healthCheckV2(t *testing.T) {
+	if os.Getenv("HEALTHCHECK_V2") == "false" {
+		t.Skip("Skipping health check for V1 Binary")
+	}
+	require.Eventuallyf(t,
+		func() bool {
+			resp, err := http.Get(healthAddr)
+			if err == nil {
+				resp.Body.Close()
+			}
+			return err == nil
+		},
+		10*time.Second,
+		time.Second,
+		"expecting health endpoint to be healthy",
+	)
+	t.Logf("V2-HealthCheck Server detected at %s", healthAddr)
+}
+
+func httpGet(t *testing.T, url string) (*http.Response, []byte) {
+	t.Logf("Executing HTTP GET %s", url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	require.NoError(t, err)
-	req.Header.Add("jaeger-debug-id", "debug")
+	req.Close = true // avoid persistent connections which leak goroutines
 
 	resp, err := httpClient.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return resp, bodyBytes
+}
+
+func checkWebUI(t *testing.T) {
+	_, bodyBytes := httpGet(t, queryAddr+"/")
+	body := string(bodyBytes)
+	t.Run("Static_files", func(t *testing.T) {
+		pattern := regexp.MustCompile(`<link rel="shortcut icon"[^<]+href="(.*?)"`)
+		match := pattern.FindStringSubmatch(body)
+		require.Len(t, match, 2)
+		url := match[1]
+		t.Logf("Found favicon reference at %s", url)
+
+		resp, err := http.Get(queryAddr + "/" + url)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+	t.Run("React_app", func(t *testing.T) {
+		assert.Contains(t, body, `<div id="jaeger-ui-root"></div>`)
+	})
+}
+
+func createTrace(t *testing.T) {
+	// Since all requests to query service are traces, creating a new trace
+	// is simply a matter of querying one of the endpoints.
+	resp, _ := httpGet(t, queryAddr+getServicesURL)
+	traceResponse := resp.Header.Get("traceresponse")
+	// Expecting: [version] [trace-id] [child-id] [trace-flags]
+	parts := strings.Split(traceResponse, "-")
+	require.Len(t, parts, 4, "traceResponse=%s", traceResponse)
+	traceID = parts[1]
+	t.Logf("Created trace %s", traceID)
 }
 
 type response struct {
@@ -85,83 +153,43 @@ type response struct {
 }
 
 func getAPITrace(t *testing.T) {
-	req, err := http.NewRequest("GET", getTraceURL, nil)
-	require.NoError(t, err)
-
 	var queryResponse response
-
 	for i := 0; i < 20; i++ {
-		resp, err := httpClient.Do(req)
-		require.NoError(t, err)
-
-		body, _ := io.ReadAll(resp.Body)
-
-		err = json.Unmarshal(body, &queryResponse)
-		require.NoError(t, err)
-		resp.Body.Close()
+		_, body := httpGet(t, queryAddr+getTraceURL+traceID)
+		require.NoError(t, json.Unmarshal(body, &queryResponse))
 
 		if len(queryResponse.Data) == 1 {
 			break
 		}
+		t.Logf("Trace %s not found (yet)", traceID)
 		time.Sleep(time.Second)
 	}
+
 	require.Len(t, queryResponse.Data, 1)
 	require.Len(t, queryResponse.Data[0].Spans, 1)
 }
 
 func getSamplingStrategy(t *testing.T) {
-	req, err := http.NewRequest("GET", getSamplingStrategyURL, nil)
-	require.NoError(t, err)
+	// TODO should we test refreshing the strategy file?
 
-	var queryResponse sampling.SamplingStrategyResponse
-	resp, err := httpClient.Do(req)
-	require.NoError(t, err)
+	r, body := httpGet(t, samplingAddr+getSamplingStrategyURL)
+	t.Logf("Sampling strategy response: %s", string(body))
+	require.EqualValues(t, http.StatusOK, r.StatusCode)
 
-	body, _ := io.ReadAll(resp.Body)
-
-	err = json.Unmarshal(body, &queryResponse)
-	require.NoError(t, err)
-	resp.Body.Close()
+	var queryResponse api_v2.SamplingStrategyResponse
+	require.NoError(t, jsonpb.Unmarshal(bytes.NewReader(body), &queryResponse))
 
 	assert.NotNil(t, queryResponse.ProbabilisticSampling)
-	assert.EqualValues(t, 1.0, queryResponse.ProbabilisticSampling.SamplingRate)
-}
-
-func healthCheck() error {
-	println("Health-checking all-in-one...")
-	for i := 0; i < 10; i++ {
-		if _, err := http.Get(queryURL); err == nil {
-			println("Health-check successful")
-			return nil
-		}
-		println("Health-check unsuccessful, waiting 1sec...")
-		time.Sleep(time.Second)
-	}
-	return fmt.Errorf("query service is not ready")
-}
-
-func faviconCheck() error {
-	println("Checking favicon...")
-	resp, err := http.Get(queryURL + "/favicon.ico")
-	if err == nil && resp.StatusCode == http.StatusOK {
-		println("Favicon check successful")
-		return nil
-	} else {
-		println("Favicon check failed")
-		return fmt.Errorf("all-in-one failed to serve favicon icon")
-	}
+	assert.InDelta(t, 1.0, queryResponse.ProbabilisticSampling.SamplingRate, 0.01)
 }
 
 func getServicesAPIV3(t *testing.T) {
-	req, err := http.NewRequest("GET", getServicesAPIV3URL, nil)
-	require.NoError(t, err)
-	resp, err := httpClient.Do(req)
-	require.NoError(t, err)
-	body, _ := io.ReadAll(resp.Body)
+	_, body := httpGet(t, queryAddr+getServicesAPIV3URL)
 
-	var servicesResponse api_v3.GetServicesResponse
-	jsonpb := runtime.JSONPb{}
-	err = jsonpb.Unmarshal(body, &servicesResponse)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"jaeger-query"}, servicesResponse.GetServices())
+	var servicesResponse struct {
+		Services []string
+	}
+	require.NoError(t, json.Unmarshal(body, &servicesResponse))
+	require.Len(t, servicesResponse.Services, 1)
+	assert.Contains(t, servicesResponse.Services[0], "jaeger")
 }

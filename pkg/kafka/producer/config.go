@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package producer
 
@@ -39,6 +28,7 @@ type Configuration struct {
 	BatchSize                 int                     `mapstructure:"batch_size"`
 	BatchMinMessages          int                     `mapstructure:"batch_min_messages"`
 	BatchMaxMessages          int                     `mapstructure:"batch_max_messages"`
+	MaxMessageBytes           int                     `mapstructure:"max_message_bytes"`
 	auth.AuthenticationConfig `mapstructure:"authentication"`
 }
 
@@ -53,6 +43,7 @@ func (c *Configuration) NewProducer(logger *zap.Logger) (sarama.AsyncProducer, e
 	saramaConfig.Producer.Flush.Frequency = c.BatchLinger
 	saramaConfig.Producer.Flush.Messages = c.BatchMinMessages
 	saramaConfig.Producer.Flush.MaxMessages = c.BatchMaxMessages
+	saramaConfig.Producer.MaxMessageBytes = c.MaxMessageBytes
 	if len(c.ProtocolVersion) > 0 {
 		ver, err := sarama.ParseKafkaVersion(c.ProtocolVersion)
 		if err != nil {

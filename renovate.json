@@ -1,0 +1,117 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":gitSignOff"
+  ],
+  "labels": [
+    "changelog:dependencies"
+  ],
+  "postUpdateOptions": [
+    "gomodTidy",
+    "gomodUpdateImportPaths"
+  ],
+  "suppressNotifications": [
+    "prEditedNotification"
+  ],
+  "packageRules": [
+    {
+      "matchFileNames": [
+        "docker-compose/cassandra/v4/docker-compose.yaml",
+        "docker-compose/cassandra/v5/docker-compose.yaml",
+        "docker-compose/elasticsearch/v6/docker-compose.yml",
+        "docker-compose/elasticsearch/v7/docker-compose.yml",
+        "docker-compose/elasticsearch/v8/docker-compose.yml",
+        "docker-compose/kafka/v2/docker-compose.yml",
+        "docker-compose/kafka/v3/docker-compose.yml",
+        "docker-compose/kafka/docker-compose.yml",
+        "docker-compose/monitor/docker-compose.yml",
+        "docker-compose/opensearch/v1/docker-compose.yml",
+        "docker-compose/opensearch/v2/docker-compose.yml",
+        "docker-compose/scylladb/docker-compose.yml"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "patch",
+        "digest"
+      ],
+      "enabled": false
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github-actions deps",
+      "schedule": [
+        "on the first day of the month"
+      ]
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "enabled": false
+    },
+    {
+      "groupName": "All OTEL SDK + contrib packages",
+      "groupSlug": "go-otel-sdk",
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "go.opentelemetry.io/otel/**",
+        "go.opentelemetry.io/contrib/**",
+        "github.com/open-telemetry/opentelemetry-go-contrib/**"
+      ]
+    },
+    {
+      "groupName": "All OTEL Collector packages",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "go.opentelemetry.io/collector{/,}**"
+      ]
+    },
+    {
+      "groupName": "All OTEL Collector contrib packages",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/open-telemetry/opentelemetry-collector-contrib{/,}**"
+      ]
+    },
+    {
+      "groupName": "All google.golang.org packages",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchSourceUrls": [
+        "google.golang.org{/,}**"
+      ]
+    },
+    {
+      "groupName": "All golang.org/x packages",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "golang.org/x{/,}**"
+      ]
+    },
+    {
+      "groupName": "All github.com/prometheus packages",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/prometheus{/,}**"
+      ]
+    }
+  ]
+}

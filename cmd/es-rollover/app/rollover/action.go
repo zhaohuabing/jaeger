@@ -1,16 +1,5 @@
 // Copyright (c) 2021 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package rollover
 
@@ -30,7 +19,7 @@ type Action struct {
 
 // Do the rollover action
 func (a *Action) Do() error {
-	rolloverIndices := app.RolloverIndices(a.Config.Archive, a.Config.SkipDependencies, a.Config.IndexPrefix)
+	rolloverIndices := app.RolloverIndices(a.Config.Archive, a.Config.SkipDependencies, a.Config.AdaptiveSampling, a.Config.IndexPrefix)
 	for _, indexName := range rolloverIndices {
 		if err := a.rollover(indexName); err != nil {
 			return err
@@ -40,7 +29,7 @@ func (a *Action) Do() error {
 }
 
 func (a *Action) rollover(indexSet app.IndexOption) error {
-	conditionsMap := map[string]interface{}{}
+	conditionsMap := map[string]any{}
 	if len(a.Conditions) > 0 {
 		err := json.Unmarshal([]byte(a.Config.Conditions), &conditionsMap)
 		if err != nil {

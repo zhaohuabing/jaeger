@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -21,8 +10,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger/internal/storage/v2/api/depstore"
 	ui "github.com/jaegertracing/jaeger/model/json"
 )
 
@@ -308,48 +300,54 @@ func TestFilterDependencies(t *testing.T) {
 }
 
 func TestGetDependenciesSuccess(t *testing.T) {
-	ts := initializeTestServer()
-	defer ts.server.Close()
+	ts := initializeTestServer(t)
 	expectedDependencies := []model.DependencyLink{{Parent: "killer", Child: "queen", CallCount: 12}}
 	endTs := time.Unix(0, 1476374248550*millisToNanosMultiplier)
-	ts.dependencyReader.On("GetDependencies", endTs, defaultDependencyLookbackDuration).Return(expectedDependencies, nil).Times(1)
+	ts.dependencyReader.On("GetDependencies",
+		mock.Anything, // context
+		depstore.QueryParameters{
+			StartTime: endTs.Add(-defaultDependencyLookbackDuration),
+			EndTime:   endTs,
+		},
+	).Return(expectedDependencies, nil).Times(1)
 
 	var response structuredResponse
 	err := getJSON(ts.server.URL+"/api/dependencies?endTs=1476374248550&service=queen", &response)
 	assert.NotEmpty(t, response.Data)
-	data := response.Data.([]interface{})[0]
-	actual := data.(map[string]interface{})
-	assert.Equal(t, actual["parent"], "killer")
-	assert.Equal(t, actual["child"], "queen")
-	assert.Equal(t, actual["callCount"], 12.00) // recovered type is float
-	assert.NoError(t, err)
+	data := response.Data.([]any)[0]
+	actual := data.(map[string]any)
+	assert.Equal(t, "killer", actual["parent"])
+	assert.Equal(t, "queen", actual["child"])
+	assert.InDelta(t, 12.00, actual["callCount"], 0.01) // recovered type is float
+	require.NoError(t, err)
 }
 
 func TestGetDependenciesCassandraFailure(t *testing.T) {
-	ts := initializeTestServer()
-	defer ts.server.Close()
+	ts := initializeTestServer(t)
 	endTs := time.Unix(0, 1476374248550*millisToNanosMultiplier)
-	ts.dependencyReader.On("GetDependencies", endTs, defaultDependencyLookbackDuration).Return(nil, errStorage).Times(1)
+	ts.dependencyReader.On("GetDependencies",
+		mock.Anything, // context
+		depstore.QueryParameters{
+			StartTime: endTs.Add(-defaultDependencyLookbackDuration),
+			EndTime:   endTs,
+		},
+	).Return(nil, errStorage).Times(1)
 
 	var response structuredResponse
 	err := getJSON(ts.server.URL+"/api/dependencies?endTs=1476374248550&service=testing", &response)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestGetDependenciesEndTimeParsingFailure(t *testing.T) {
-	ts := initializeTestServer()
-	defer ts.server.Close()
-
+	ts := initializeTestServer(t)
 	var response structuredResponse
 	err := getJSON(ts.server.URL+"/api/dependencies?endTs=shazbot&service=testing", &response)
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestGetDependenciesLookbackParsingFailure(t *testing.T) {
-	ts := initializeTestServer()
-	defer ts.server.Close()
-
+	ts := initializeTestServer(t)
 	var response structuredResponse
 	err := getJSON(ts.server.URL+"/api/dependencies?endTs=1476374248550&service=testing&lookback=shazbot", &response)
-	assert.Error(t, err)
+	require.Error(t, err)
 }

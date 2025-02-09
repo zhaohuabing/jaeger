@@ -1,21 +1,12 @@
 // Copyright (c) 2021 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package main
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -28,7 +19,6 @@ import (
 
 	"github.com/jaegertracing/jaeger/cmd/es-index-cleaner/app"
 	"github.com/jaegertracing/jaeger/pkg/config"
-	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
 	"github.com/jaegertracing/jaeger/pkg/es/client"
 )
 
@@ -36,15 +26,14 @@ func main() {
 	logger, _ := zap.NewProduction()
 	v := viper.New()
 	cfg := &app.Config{}
-	tlsFlags := tlscfg.ClientFlagsConfig{Prefix: "es"}
 
 	command := &cobra.Command{
 		Use:   "jaeger-es-index-cleaner NUM_OF_DAYS http://HOSTNAME:PORT",
 		Short: "Jaeger es-index-cleaner removes Jaeger indices",
 		Long:  "Jaeger es-index-cleaner removes Jaeger indices",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) != 2 {
-				return fmt.Errorf("wrong number of arguments")
+				return errors.New("wrong number of arguments")
 			}
 			numOfDays, err := strconv.Atoi(args[0])
 			if err != nil {
@@ -52,21 +41,18 @@ func main() {
 			}
 
 			cfg.InitFromViper(v)
-			tlsOpts, err := tlsFlags.InitFromViper(v)
+
+			ctx := context.Background()
+			tlscfg, err := cfg.TLSConfig.LoadTLSConfig(ctx)
 			if err != nil {
-				return err
+				return fmt.Errorf("error loading tls config : %w", err)
 			}
-			tlsCfg, err := tlsOpts.Config(logger)
-			if err != nil {
-				return err
-			}
-			defer tlsOpts.Close()
 
 			c := &http.Client{
 				Timeout: time.Duration(cfg.MasterNodeTimeoutSeconds) * time.Second,
 				Transport: &http.Transport{
 					Proxy:           http.ProxyFromEnvironment,
-					TLSClientConfig: tlsCfg,
+					TLSClientConfig: tlscfg,
 				},
 			}
 			i := client.IndicesClient{
@@ -75,7 +61,8 @@ func main() {
 					Client:    c,
 					BasicAuth: basicAuth(cfg.Username, cfg.Password),
 				},
-				MasterTimeoutSeconds: cfg.MasterNodeTimeoutSeconds,
+				MasterTimeoutSeconds:   cfg.MasterNodeTimeoutSeconds,
+				IgnoreUnavailableIndex: true,
 			}
 
 			indices, err := i.GetJaegerIndices(cfg.IndexPrefix)
@@ -111,7 +98,6 @@ func main() {
 		v,
 		command,
 		cfg.AddFlags,
-		tlsFlags.AddFlags,
 	)
 
 	if err := command.Execute(); err != nil {

@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package grpc
 
@@ -22,6 +11,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configtls"
 
 	"github.com/jaegertracing/jaeger/pkg/config"
 )
@@ -42,6 +32,17 @@ func TestBindFlags(t *testing.T) {
 		{
 			cOpts:    []string{"--reporter.grpc.host-port=localhost:1111,localhost:2222", "--reporter.grpc.discovery.min-peers=5"},
 			expected: &ConnBuilder{CollectorHostPorts: []string{"localhost:1111", "localhost:2222"}, MaxRetry: defaultMaxRetry, DiscoveryMinPeers: 5},
+		},
+		{
+			cOpts: []string{"--reporter.grpc.tls.enabled=true"},
+			expected: &ConnBuilder{
+				TLS: &configtls.ClientConfig{
+					Config: configtls.Config{
+						IncludeSystemCACertsPool: true,
+					},
+				},
+				MaxRetry: defaultMaxRetry, DiscoveryMinPeers: 3,
+			},
 		},
 	}
 	for _, test := range tests {
@@ -68,6 +69,5 @@ func TestBindTLSFlagFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = new(ConnBuilder).InitFromViper(v)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to process TLS options")
+	assert.ErrorContains(t, err, "failed to process TLS options")
 }

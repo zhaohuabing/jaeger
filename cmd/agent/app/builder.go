@@ -1,21 +1,11 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,15 +14,15 @@ import (
 	"github.com/apache/thrift/lib/go/thrift"
 	"go.uber.org/zap"
 
+	agentThrift "github.com/jaegertracing/jaeger-idl/thrift-gen/agent"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/configmanager"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/httpserver"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/processors"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/reporter"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/servers"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/servers/thriftudp"
+	"github.com/jaegertracing/jaeger/internal/safeexpvar"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
-	"github.com/jaegertracing/jaeger/ports"
-	agentThrift "github.com/jaegertracing/jaeger/thrift-gen/agent"
 )
 
 const (
@@ -47,7 +37,7 @@ const (
 	binaryProtocol  Protocol = "binary"
 )
 
-var defaultHTTPServerHostPort = ":" + strconv.Itoa(ports.AgentConfigServerHTTP)
+var defaultHTTPServerHostPort = ":" + strconv.Itoa(AgentConfigServerHTTP)
 
 // Model used to distinguish the data transfer model
 type Model string
@@ -91,7 +81,7 @@ type ServerConfiguration struct {
 	HostPort         string `yaml:"hostPort" validate:"nonzero"`
 }
 
-// HTTPServerConfiguration holds config for a server providing sampling strategies and baggage restrictions to clients
+// HTTPServerConfiguration holds config for a server providing sampling strategies to clients
 type HTTPServerConfiguration struct {
 	HostPort string `yaml:"hostPort" validate:"nonzero"`
 }
@@ -105,14 +95,14 @@ func (b *Builder) WithReporter(r ...reporter.Reporter) *Builder {
 // CreateAgent creates the Agent
 func (b *Builder) CreateAgent(primaryProxy CollectorProxy, logger *zap.Logger, mFactory metrics.Factory) (*Agent, error) {
 	r := b.getReporter(primaryProxy)
-	processors, err := b.getProcessors(r, mFactory, logger)
+	procs, err := b.getProcessors(r, mFactory, logger)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create processors: %w", err)
 	}
 	server := b.HTTPServer.getHTTPServer(primaryProxy.GetManager(), mFactory, logger)
-	b.publishOpts(mFactory)
+	b.publishOpts()
 
-	return NewAgent(processors, server, logger), nil
+	return NewAgent(procs, server, logger), nil
 }
 
 func (b *Builder) getReporter(primaryProxy CollectorProxy) reporter.Reporter {
@@ -127,16 +117,12 @@ func (b *Builder) getReporter(primaryProxy CollectorProxy) reporter.Reporter {
 	return reporter.NewMultiReporter(rep...)
 }
 
-func (b *Builder) publishOpts(mFactory metrics.Factory) {
-	internalFactory := mFactory.Namespace(metrics.NSOptions{Name: "internal"})
+func (b *Builder) publishOpts() {
 	for _, p := range b.Processors {
 		prefix := fmt.Sprintf(processorPrefixFmt, p.Model, p.Protocol)
-		internalFactory.Gauge(metrics.Options{Name: prefix + suffixServerMaxPacketSize}).
-			Update(int64(p.Server.MaxPacketSize))
-		internalFactory.Gauge(metrics.Options{Name: prefix + suffixServerQueueSize}).
-			Update(int64(p.Server.QueueSize))
-		internalFactory.Gauge(metrics.Options{Name: prefix + suffixWorkers}).
-			Update(int64(p.Workers))
+		safeexpvar.SetInt(prefix+suffixServerMaxPacketSize, int64(p.Server.MaxPacketSize))
+		safeexpvar.SetInt(prefix+suffixServerQueueSize, int64(p.Server.QueueSize))
+		safeexpvar.SetInt(prefix+suffixWorkers, int64(p.Workers))
 	}
 }
 
@@ -154,11 +140,11 @@ func (b *Builder) getProcessors(rep reporter.Reporter, mFactory metrics.Factory,
 		default:
 			return nil, fmt.Errorf("cannot find agent processor for data model %v", cfg.Model)
 		}
-		metrics := mFactory.Namespace(metrics.NSOptions{Name: "", Tags: map[string]string{
+		metricsNamespace := mFactory.Namespace(metrics.NSOptions{Name: "", Tags: map[string]string{
 			"protocol": string(cfg.Protocol),
 			"model":    string(cfg.Model),
 		}})
-		processor, err := cfg.GetThriftProcessor(metrics, protoFactory, handler, logger)
+		processor, err := cfg.GetThriftProcessor(metricsNamespace, protoFactory, handler, logger)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create Thrift Processor: %w", err)
 		}
@@ -167,12 +153,13 @@ func (b *Builder) getProcessors(rep reporter.Reporter, mFactory metrics.Factory,
 	return retMe, nil
 }
 
-// GetHTTPServer creates an HTTP server that provides sampling strategies and baggage restrictions to client libraries.
+// GetHTTPServer creates an HTTP server that provides sampling strategies to client libraries.
 func (c HTTPServerConfiguration) getHTTPServer(manager configmanager.ClientConfigManager, mFactory metrics.Factory, logger *zap.Logger) *http.Server {
-	if c.HostPort == "" {
-		c.HostPort = defaultHTTPServerHostPort
+	hostPort := c.HostPort
+	if hostPort == "" {
+		hostPort = defaultHTTPServerHostPort
 	}
-	return httpserver.NewHTTPServer(c.HostPort, manager, mFactory, logger)
+	return httpserver.NewHTTPServer(hostPort, manager, mFactory, logger)
 }
 
 // GetThriftProcessor gets a TBufferedServer backed Processor using the collector configuration
@@ -237,10 +224,11 @@ type ProxyBuilderOptions struct {
 }
 
 // CollectorProxyBuilder is a func which builds CollectorProxy.
-type CollectorProxyBuilder func(ProxyBuilderOptions) (CollectorProxy, error)
+type CollectorProxyBuilder func(context.Context, ProxyBuilderOptions) (CollectorProxy, error)
 
 // CreateCollectorProxy creates collector proxy
 func CreateCollectorProxy(
+	ctx context.Context,
 	opts ProxyBuilderOptions,
 	builders map[reporter.Type]CollectorProxyBuilder,
 ) (CollectorProxy, error) {
@@ -248,5 +236,5 @@ func CreateCollectorProxy(
 	if !ok {
 		return nil, fmt.Errorf("unknown reporter type %s", string(opts.ReporterType))
 	}
-	return builder(opts)
+	return builder(ctx, opts)
 }

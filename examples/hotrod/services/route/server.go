@@ -1,31 +1,18 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package route
 
 import (
 	"context"
 	"encoding/json"
-	"expvar"
 	"math"
 	"math/rand"
 	"net/http"
 	"time"
 
-	"github.com/opentracing/opentracing-go"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger/examples/hotrod/pkg/delay"
@@ -38,12 +25,12 @@ import (
 // Server implements Route service
 type Server struct {
 	hostPort string
-	tracer   opentracing.Tracer
+	tracer   trace.TracerProvider
 	logger   log.Factory
 }
 
 // NewServer creates a new route.Server
-func NewServer(hostPort string, tracer opentracing.Tracer, logger log.Factory) *Server {
+func NewServer(hostPort string, tracer trace.TracerProvider, logger log.Factory) *Server {
 	return &Server{
 		hostPort: hostPort,
 		tracer:   tracer,
@@ -55,15 +42,24 @@ func NewServer(hostPort string, tracer opentracing.Tracer, logger log.Factory) *
 func (s *Server) Run() error {
 	mux := s.createServeMux()
 	s.logger.Bg().Info("Starting", zap.String("address", "http://"+s.hostPort))
-	return http.ListenAndServe(s.hostPort, mux)
+	server := &http.Server{
+		Addr:              s.hostPort,
+		Handler:           mux,
+		ReadHeaderTimeout: 3 * time.Second,
+	}
+	return server.ListenAndServe()
 }
 
 func (s *Server) createServeMux() http.Handler {
-	mux := tracing.NewServeMux(s.tracer)
+	mux := tracing.NewServeMux(false, s.tracer, s.logger)
 	mux.Handle("/route", http.HandlerFunc(s.route))
-	mux.Handle("/debug/vars", expvar.Handler()) // expvar
-	mux.Handle("/metrics", promhttp.Handler())  // Prometheus
+	mux.Handle("/debug/vars", http.HandlerFunc(movedToFrontend))
+	mux.Handle("/metrics", http.HandlerFunc(movedToFrontend))
 	return mux
+}
+
+func movedToFrontend(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "endpoint moved to the frontend service", http.StatusNotFound)
 }
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {

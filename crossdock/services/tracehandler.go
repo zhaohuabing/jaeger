@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package services
 
@@ -57,7 +46,7 @@ type testFunc func(service string, request *traceRequest) ([]*ui.Trace, error)
 // TraceHandler handles creating traces and verifying them
 type TraceHandler struct {
 	query                                 QueryService
-	agent                                 AgentService
+	agent                                 CollectorService
 	logger                                *zap.Logger
 	getClientURL                          func(service string) string
 	getTags                               func() map[string]string
@@ -68,7 +57,7 @@ type TraceHandler struct {
 }
 
 // NewTraceHandler returns a TraceHandler that can create traces and verify them
-func NewTraceHandler(query QueryService, agent AgentService, logger *zap.Logger) *TraceHandler {
+func NewTraceHandler(query QueryService, agent CollectorService, logger *zap.Logger) *TraceHandler {
 	return &TraceHandler{
 		query:  query,
 		agent:  agent,
@@ -123,7 +112,7 @@ func (h *TraceHandler) AdaptiveSamplingTest(t crossdock.T) {
 	}
 }
 
-func (h *TraceHandler) runTest(service string, request *traceRequest, tFunc testFunc, vFunc validateFunc) error {
+func (*TraceHandler) runTest(service string, request *traceRequest, tFunc testFunc, vFunc validateFunc) error {
 	traces, err := tFunc(service, request)
 	if err != nil {
 		return err
@@ -185,7 +174,7 @@ func validateAdaptiveSamplingTraces(expected *traceRequest, actual []*ui.Trace) 
 			return fmt.Errorf("%s tag value should be '%s'", samplerTypeKey, jaeger.SamplerTypeProbabilistic)
 		}
 		if isDefaultProbability(probability) {
-			return fmt.Errorf("adaptive sampling probability not used")
+			return errors.New("adaptive sampling probability not used")
 		}
 	}
 	return nil
@@ -212,7 +201,7 @@ func (h *TraceHandler) createAndRetrieveTraces(service string, request *traceReq
 	}
 	traces := h.getTraces(service, request.Operation, request.Tags)
 	if len(traces) == 0 {
-		return nil, fmt.Errorf("could not retrieve traces from query service")
+		return nil, errors.New("could not retrieve traces from query service")
 	}
 	return traces, nil
 }
@@ -272,7 +261,7 @@ func validateTraces(expected *traceRequest, actual []*ui.Trace) error {
 		}
 		tags := convertTagsIntoMap(trace.Spans[0].Tags)
 		if !expectedTagsExist(expected.Tags, tags) {
-			return fmt.Errorf("expected tags not found")
+			return errors.New("expected tags not found")
 		}
 	}
 	return nil

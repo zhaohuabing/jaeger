@@ -1,68 +1,65 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"sync"
 
+	"go.opentelemetry.io/collector/component/componentstatus"
+	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/confignet"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/jaegertracing/jaeger/cmd/query/app/querysvc"
-	"github.com/jaegertracing/jaeger/pkg/healthcheck"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/dependencystore"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/grpc/shared"
+	"github.com/jaegertracing/jaeger/pkg/bearertoken"
+	"github.com/jaegertracing/jaeger/pkg/telemetry"
 	"github.com/jaegertracing/jaeger/pkg/tenancy"
-	"github.com/jaegertracing/jaeger/plugin/storage/grpc/shared"
-	"github.com/jaegertracing/jaeger/storage"
-	"github.com/jaegertracing/jaeger/storage/dependencystore"
-	"github.com/jaegertracing/jaeger/storage/spanstore"
 )
 
 // Server runs a gRPC server
 type Server struct {
-	logger *zap.Logger
-	opts   *Options
+	opts       *Options
+	grpcConn   net.Listener
+	grpcServer *grpc.Server
+	stopped    sync.WaitGroup
+	telset     telemetry.Settings
+}
 
-	grpcConn           net.Listener
-	grpcServer         *grpc.Server
-	unavailableChannel chan healthcheck.Status // used to signal to admin server that gRPC server is unavailable
+type storageFactory interface {
+	CreateSpanReader() (spanstore.Reader, error)
+	CreateSpanWriter() (spanstore.Writer, error)
+	CreateDependencyReader() (dependencystore.Reader, error)
 }
 
 // NewServer creates and initializes Server.
-func NewServer(options *Options, storageFactory storage.Factory, tm *tenancy.Manager, logger *zap.Logger) (*Server, error) {
-	handler, err := createGRPCHandler(storageFactory, logger)
+func NewServer(options *Options, storageFactory storageFactory, tm *tenancy.Manager, telset telemetry.Settings) (*Server, error) {
+	handler, err := createGRPCHandler(storageFactory)
 	if err != nil {
 		return nil, err
 	}
 
-	grpcServer, err := createGRPCServer(options, tm, handler, logger)
+	grpcServer, err := createGRPCServer(options, tm, handler, telset)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Server{
-		logger:             logger,
-		opts:               options,
-		grpcServer:         grpcServer,
-		unavailableChannel: make(chan healthcheck.Status),
+		opts:       options,
+		grpcServer: grpcServer,
+		telset:     telset,
 	}, nil
 }
 
-func createGRPCHandler(f storage.Factory, logger *zap.Logger) (*shared.GRPCHandler, error) {
+func createGRPCHandler(f storageFactory) (*shared.GRPCHandler, error) {
 	reader, err := f.CreateSpanReader()
 	if err != nil {
 		return nil, err
@@ -83,60 +80,54 @@ func createGRPCHandler(f storage.Factory, logger *zap.Logger) (*shared.GRPCHandl
 		StreamingSpanWriter: func() spanstore.Writer { return nil },
 	}
 
-	// borrow code from Query service for archive storage
-	qOpts := &querysvc.QueryServiceOptions{}
-	// when archive storage not initialized (returns false), the reader/writer will be nil
-	_ = qOpts.InitArchiveStorage(f, logger)
-	impl.ArchiveSpanReader = func() spanstore.Reader { return qOpts.ArchiveSpanReader }
-	impl.ArchiveSpanWriter = func() spanstore.Writer { return qOpts.ArchiveSpanWriter }
-
 	handler := shared.NewGRPCHandler(impl)
 	return handler, nil
 }
 
-// HealthCheckStatus returns health check status channel a client can subscribe to
-func (s Server) HealthCheckStatus() chan healthcheck.Status {
-	return s.unavailableChannel
-}
-
-func createGRPCServer(opts *Options, tm *tenancy.Manager, handler *shared.GRPCHandler, logger *zap.Logger) (*grpc.Server, error) {
-	var grpcOpts []grpc.ServerOption
-
-	if opts.TLSGRPC.Enabled {
-		tlsCfg, err := opts.TLSGRPC.Config(logger)
-		if err != nil {
-			return nil, fmt.Errorf("invalid TLS config: %w", err)
-		}
-		creds := credentials.NewTLS(tlsCfg)
-		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+func createGRPCServer(opts *Options, tm *tenancy.Manager, handler *shared.GRPCHandler, telset telemetry.Settings) (*grpc.Server, error) {
+	unaryInterceptors := []grpc.UnaryServerInterceptor{
+		bearertoken.NewUnaryServerInterceptor(),
+	}
+	streamInterceptors := []grpc.StreamServerInterceptor{
+		bearertoken.NewStreamServerInterceptor(),
 	}
 	if tm.Enabled {
-		grpcOpts = append(grpcOpts,
-			grpc.StreamInterceptor(tenancy.NewGuardingStreamInterceptor(tm)),
-			grpc.UnaryInterceptor(tenancy.NewGuardingUnaryInterceptor(tm)),
-		)
+		unaryInterceptors = append(unaryInterceptors, tenancy.NewGuardingUnaryInterceptor(tm))
+		streamInterceptors = append(streamInterceptors, tenancy.NewGuardingStreamInterceptor(tm))
 	}
 
-	server := grpc.NewServer(grpcOpts...)
+	opts.NetAddr.Transport = confignet.TransportTypeTCP
+	server, err := opts.ToServer(context.Background(),
+		telset.Host,
+		telset.ToOtelComponent(),
+		configgrpc.WithGrpcServerOption(grpc.ChainUnaryInterceptor(unaryInterceptors...)),
+		configgrpc.WithGrpcServerOption(grpc.ChainStreamInterceptor(streamInterceptors...)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gRPC server: %w", err)
+	}
+	healthServer := health.NewServer()
 	reflection.Register(server)
-	handler.Register(server)
+	handler.Register(server, healthServer)
 
 	return server, nil
 }
 
 // Start gRPC server concurrently
 func (s *Server) Start() error {
-	listener, err := net.Listen("tcp", s.opts.GRPCHostPort)
+	var err error
+	s.grpcConn, err = s.opts.NetAddr.Listen(context.Background())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to listen on gRPC port: %w", err)
 	}
-	s.logger.Info("Starting GRPC server", zap.Stringer("addr", listener.Addr()))
-	s.grpcConn = listener
+	s.telset.Logger.Info("Starting GRPC server", zap.Stringer("addr", s.grpcConn.Addr()))
+	s.stopped.Add(1)
 	go func() {
+		defer s.stopped.Done()
 		if err := s.grpcServer.Serve(s.grpcConn); err != nil {
-			s.logger.Error("GRPC server exited", zap.Error(err))
+			s.telset.Logger.Error("GRPC server exited", zap.Error(err))
+			s.telset.ReportStatus(componentstatus.NewFatalErrorEvent(err))
 		}
-		s.unavailableChannel <- healthcheck.Unavailable
 	}()
 
 	return nil
@@ -145,7 +136,7 @@ func (s *Server) Start() error {
 // Close stops http, GRPC servers and closes the port listener.
 func (s *Server) Close() error {
 	s.grpcServer.Stop()
-	s.grpcConn.Close()
-	s.opts.TLSGRPC.Close()
+	s.stopped.Wait()
+	s.telset.ReportStatus(componentstatus.NewEvent(componentstatus.StatusStopped))
 	return nil
 }

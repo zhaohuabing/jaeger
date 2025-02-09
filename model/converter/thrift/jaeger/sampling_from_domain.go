@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package jaeger
 
@@ -18,8 +7,8 @@ import (
 	"errors"
 	"math"
 
-	"github.com/jaegertracing/jaeger/proto-gen/api_v2"
-	"github.com/jaegertracing/jaeger/thrift-gen/sampling"
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/sampling"
 )
 
 // ConvertSamplingResponseFromDomain converts proto sampling response to its thrift representation.
@@ -55,7 +44,10 @@ func convertRateLimitingFromDomain(s *api_v2.RateLimitingSamplingStrategy) (*sam
 	if s.MaxTracesPerSecond > math.MaxInt16 {
 		return nil, errors.New("maxTracesPerSecond is higher than int16")
 	}
-	return &sampling.RateLimitingSamplingStrategy{MaxTracesPerSecond: int16(s.GetMaxTracesPerSecond())}, nil
+	return &sampling.RateLimitingSamplingStrategy{
+		//nolint: gosec // G115
+		MaxTracesPerSecond: int16(s.GetMaxTracesPerSecond()),
+	}, nil
 }
 
 func convertPerOperationFromDomain(s *api_v2.PerOperationSamplingStrategies) *sampling.PerOperationSamplingStrategies {
@@ -67,11 +59,12 @@ func convertPerOperationFromDomain(s *api_v2.PerOperationSamplingStrategies) *sa
 		DefaultLowerBoundTracesPerSecond: s.GetDefaultLowerBoundTracesPerSecond(),
 		DefaultUpperBoundTracesPerSecond: &s.DefaultUpperBoundTracesPerSecond,
 	}
-	if s.GetPerOperationStrategies() != nil {
-		r.PerOperationStrategies = make([]*sampling.OperationSamplingStrategy, len(s.GetPerOperationStrategies()))
-		for i, k := range s.PerOperationStrategies {
-			r.PerOperationStrategies[i] = convertOperationFromDomain(k)
-		}
+
+	perOp := s.GetPerOperationStrategies()
+	// Default to empty array so that json.Marshal returns [] instead of null (Issue #3891).
+	r.PerOperationStrategies = make([]*sampling.OperationSamplingStrategy, len(perOp))
+	for i, k := range perOp {
+		r.PerOperationStrategies[i] = convertOperationFromDomain(k)
 	}
 	return r
 }

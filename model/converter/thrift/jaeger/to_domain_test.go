@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package jaeger
 
@@ -28,8 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jaegertracing/jaeger/model"
-	"github.com/jaegertracing/jaeger/thrift-gen/jaeger"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/jaeger"
 )
 
 const NumberOfFixtures = 2
@@ -55,7 +44,7 @@ func TestToDomain(t *testing.T) {
 					t.Log(err)
 				}
 				out, err := json.Marshal(actualSpans)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				t.Logf("Actual trace %v: %s", i, string(out))
 			}
 		})
@@ -88,7 +77,7 @@ func loadBatch(t *testing.T, file string) *jaeger.Batch {
 	return &batch
 }
 
-func loadJSON(t *testing.T, fileName string, obj interface{}) {
+func loadJSON(t *testing.T, fileName string, obj any) {
 	jsonFile, err := os.Open(fileName)
 	require.NoError(t, err, "Failed to load json fixture file %s", fileName)
 	jsonParser := json.NewDecoder(jsonFile)
@@ -102,7 +91,7 @@ func TestUnknownJaegerType(t *testing.T) {
 		Key:   "sneh",
 	})
 	expected := model.String("sneh", "Unknown VType: Tag({Key:sneh VType:<UNSET> VStr:<nil> VDouble:<nil> VBool:<nil> VLong:<nil> VBinary:[]})")
-	assert.Equal(t, mkv, expected)
+	assert.Equal(t, expected, mkv)
 }
 
 func TestToDomain_ToDomainProcess(t *testing.T) {

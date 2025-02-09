@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package processor
 
@@ -21,11 +10,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	cmocks "github.com/jaegertracing/jaeger/cmd/ingester/app/consumer/mocks"
-	"github.com/jaegertracing/jaeger/model"
-	umocks "github.com/jaegertracing/jaeger/pkg/kafka/mocks"
-	smocks "github.com/jaegertracing/jaeger/storage/spanstore/mocks"
+	smocks "github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore/mocks"
+	umocks "github.com/jaegertracing/jaeger/internal/storage/v1/kafka/mocks"
 )
 
 func TestNewSpanProcessor(t *testing.T) {
@@ -49,14 +39,14 @@ func TestSpanProcessor_Process(t *testing.T) {
 
 	message.On("Value").Return(data)
 	mockUnmarshaller.On("Unmarshal", data).Return(span, nil)
-	mockWriter.On("WriteSpan", context.Background(), span).
+	mockWriter.On("WriteSpan", context.TODO(), span).
 		Return(nil).
 		Run(func(args mock.Arguments) {
 			span := args[1].(*model.Span)
 			assert.NotNil(t, span.Process, "sanitizer must fix Process=nil data issue")
 		})
 
-	assert.Nil(t, processor.Process(message))
+	require.NoError(t, processor.Process(message))
 
 	message.AssertExpectations(t)
 	mockWriter.AssertExpectations(t)
@@ -76,7 +66,7 @@ func TestSpanProcessor_ProcessError(t *testing.T) {
 	message.On("Value").Return(data)
 	unmarshallerMock.On("Unmarshal", data).Return(nil, errors.New("moocow"))
 
-	assert.Error(t, processor.Process(message))
+	require.Error(t, processor.Process(message))
 
 	message.AssertExpectations(t)
 	writer.AssertExpectations(t)

@@ -1,51 +1,25 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package cmd
 
 import (
-	"math/rand"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/uber/jaeger-lib/metrics"
-	jexpvar "github.com/uber/jaeger-lib/metrics/expvar"
-	jprom "github.com/uber/jaeger-lib/metrics/prometheus"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	"github.com/jaegertracing/jaeger/examples/hotrod/services/config"
+	"github.com/jaegertracing/jaeger/internal/jaegerclientenv2otel"
+	"github.com/jaegertracing/jaeger/internal/metrics/prometheus"
+	"github.com/jaegertracing/jaeger/pkg/metrics"
 )
 
 var (
-	metricsBackend string
 	logger         *zap.Logger
 	metricsFactory metrics.Factory
-
-	fixDBConnDelay         time.Duration
-	fixDBConnDisableMutex  bool
-	fixRouteWorkerPoolSize int
-
-	customerPort int
-	driverPort   int
-	frontendPort int
-	routePort    int
-
-	basepath string
-	jaegerUI string
 )
 
 // RootCmd represents the base command when called without any subcommands
@@ -65,41 +39,27 @@ func Execute() {
 }
 
 func init() {
-	RootCmd.PersistentFlags().StringVarP(&metricsBackend, "metrics", "m", "expvar", "Metrics backend (expvar|prometheus)")
-	RootCmd.PersistentFlags().DurationVarP(&fixDBConnDelay, "fix-db-query-delay", "D", 300*time.Millisecond, "Average latency of MySQL DB query")
-	RootCmd.PersistentFlags().BoolVarP(&fixDBConnDisableMutex, "fix-disable-db-conn-mutex", "M", false, "Disables the mutex guarding db connection")
-	RootCmd.PersistentFlags().IntVarP(&fixRouteWorkerPoolSize, "fix-route-worker-pool-size", "W", 3, "Default worker pool size")
-
-	// Add flags to choose ports for services
-	RootCmd.PersistentFlags().IntVarP(&customerPort, "customer-service-port", "c", 8081, "Port for customer service")
-	RootCmd.PersistentFlags().IntVarP(&driverPort, "driver-service-port", "d", 8082, "Port for driver service")
-	RootCmd.PersistentFlags().IntVarP(&frontendPort, "frontend-service-port", "f", 8080, "Port for frontend service")
-	RootCmd.PersistentFlags().IntVarP(&routePort, "route-service-port", "r", 8083, "Port for routing service")
-
-	// Flag for serving frontend at custom basepath url
-	RootCmd.PersistentFlags().StringVarP(&basepath, "basepath", "b", "", `Basepath for frontend service(default "/")`)
-	RootCmd.PersistentFlags().StringVarP(&jaegerUI, "jaeger-ui", "j", "http://localhost:16686", "Address of Jaeger UI to create [find trace] links")
-
-	rand.Seed(int64(time.Now().Nanosecond()))
-	logger, _ = zap.NewDevelopment(
-		zap.AddStacktrace(zapcore.FatalLevel),
-		zap.AddCallerSkip(1),
-	)
+	addFlags(RootCmd)
 	cobra.OnInitialize(onInitialize)
 }
 
 // onInitialize is called before the command is executed.
 func onInitialize() {
-	switch metricsBackend {
-	case "expvar":
-		metricsFactory = jexpvar.NewFactory(10) // 10 buckets for histograms
-		logger.Info("Using expvar as metrics backend")
-	case "prometheus":
-		metricsFactory = jprom.New().Namespace(metrics.NSOptions{Name: "hotrod", Tags: nil})
-		logger.Info("Using Prometheus as metrics backend")
-	default:
-		logger.Fatal("unsupported metrics backend " + metricsBackend)
+	zapOptions := []zap.Option{
+		zap.AddStacktrace(zapcore.FatalLevel),
+		zap.AddCallerSkip(1),
 	}
+	if !verbose {
+		zapOptions = append(zapOptions,
+			zap.IncreaseLevel(zap.LevelEnablerFunc(func(l zapcore.Level) bool { return l != zapcore.DebugLevel })),
+		)
+	}
+	logger, _ = zap.NewDevelopment(zapOptions...)
+
+	jaegerclientenv2otel.MapJaegerToOtelEnvVars(logger)
+
+	metricsFactory = prometheus.New().Namespace(metrics.NSOptions{Name: "hotrod", Tags: nil})
+
 	if config.MySQLGetDelay != fixDBConnDelay {
 		logger.Info("fix: overriding MySQL query delay", zap.Duration("old", config.MySQLGetDelay), zap.Duration("new", fixDBConnDelay))
 		config.MySQLGetDelay = fixDBConnDelay

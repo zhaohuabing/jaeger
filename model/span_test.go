@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package model_test
 
@@ -23,12 +12,10 @@ import (
 
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/gogo/protobuf/proto"
-	"github.com/opentracing/opentracing-go/ext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 )
 
 // Verify: https://cryptii.com/base64-to-hex
@@ -53,21 +40,18 @@ func TestTraceIDMarshalJSONPB(t *testing.T) {
 			ref := model.SpanRef{TraceID: model.NewTraceID(testCase.hi, testCase.lo)}
 			out := new(bytes.Buffer)
 			err := new(jsonpb.Marshaler).Marshal(out, &ref)
-			if assert.NoError(t, err) {
-				assert.Equal(t, expected, out.String())
-				assert.Equal(t, testCase.hex, ref.TraceID.String())
-			}
+			require.NoError(t, err)
+			assert.Equal(t, expected, out.String())
+			assert.Equal(t, testCase.hex, ref.TraceID.String())
 
 			ref = model.SpanRef{}
 			err = jsonpb.Unmarshal(bytes.NewReader([]byte(expected)), &ref)
-			if assert.NoError(t, err) {
-				assert.Equal(t, testCase.hi, ref.TraceID.High)
-				assert.Equal(t, testCase.lo, ref.TraceID.Low)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, testCase.hi, ref.TraceID.High)
+			assert.Equal(t, testCase.lo, ref.TraceID.Low)
 			traceID, err := model.TraceIDFromString(testCase.hex)
-			if assert.NoError(t, err) {
-				assert.Equal(t, ref.TraceID, traceID)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, ref.TraceID, traceID)
 		})
 	}
 }
@@ -88,23 +72,20 @@ func TestTraceIDUnmarshalJSONPBErrors(t *testing.T) {
 			var ref model.SpanRef
 			json := fmt.Sprintf(`{"traceId":"%s"}`, testCase.in)
 			err := jsonpb.Unmarshal(bytes.NewReader([]byte(json)), &ref)
-			assert.Error(t, err)
+			require.Error(t, err)
 
 			_, err = model.TraceIDFromString(testCase.in)
-			assert.Error(t, err)
+			require.Error(t, err)
 		})
 	}
 	// for code coverage
 	var id model.TraceID
 	_, err := id.MarshalText()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported method")
+	require.ErrorContains(t, err, "unsupported method")
 	err = id.UnmarshalText(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported method")
+	require.ErrorContains(t, err, "unsupported method")
 	_, err = id.MarshalTo(make([]byte, 1))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "buffer is too short")
+	assert.ErrorContains(t, err, "buffer is too short")
 }
 
 var (
@@ -129,20 +110,17 @@ func TestSpanIDMarshalJSON(t *testing.T) {
 			ref := model.SpanRef{SpanID: model.SpanID(testCase.id)}
 			out := new(bytes.Buffer)
 			err := new(jsonpb.Marshaler).Marshal(out, &ref)
-			if assert.NoError(t, err) {
-				assert.Equal(t, expected, out.String())
-			}
+			require.NoError(t, err)
+			assert.Equal(t, expected, out.String())
 			assert.Equal(t, testCase.hex, ref.SpanID.String())
 
 			ref = model.SpanRef{}
 			err = jsonpb.Unmarshal(bytes.NewReader([]byte(expected)), &ref)
-			if assert.NoError(t, err) {
-				assert.Equal(t, model.NewSpanID(testCase.id), ref.SpanID)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, model.NewSpanID(testCase.id), ref.SpanID)
 			spanID, err := model.SpanIDFromString(testCase.hex)
-			if assert.NoError(t, err) {
-				assert.Equal(t, model.NewSpanID(testCase.id), spanID)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, model.NewSpanID(testCase.id), spanID)
 		})
 	}
 }
@@ -162,33 +140,29 @@ func TestSpanIDUnmarshalJSONErrors(t *testing.T) {
 		t.Run(in, func(t *testing.T) {
 			var ref model.SpanRef
 			err := jsonpb.Unmarshal(bytes.NewReader([]byte(in)), &ref)
-			assert.Error(t, err)
+			require.Error(t, err)
 
 			_, err = model.SpanIDFromString(testCase.in)
-			assert.Error(t, err)
+			require.Error(t, err)
 		})
 	}
 	// for code coverage
 	var id model.SpanID
 	_, err := id.MarshalText()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported method")
+	require.ErrorContains(t, err, "unsupported method")
 	err = id.UnmarshalText(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported method")
+	require.ErrorContains(t, err, "unsupported method")
 
 	err = id.UnmarshalJSONPB(nil, []byte(""))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid length for SpanID")
+	require.ErrorContains(t, err, "invalid length for SpanID")
 	err = id.UnmarshalJSONPB(nil, []byte("123"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "illegal base64 data")
+	assert.ErrorContains(t, err, "illegal base64 data")
 }
 
 func TestIsRPCClientServer(t *testing.T) {
 	span1 := &model.Span{
 		Tags: model.KeyValues{
-			model.String(string(ext.SpanKind), string(ext.SpanKindRPCClientEnum)),
+			model.String(model.SpanKindKey, "client"),
 		},
 	}
 	assert.True(t, span1.IsRPCClient())
@@ -198,60 +172,27 @@ func TestIsRPCClientServer(t *testing.T) {
 	assert.False(t, span2.IsRPCServer())
 }
 
-func TestIsDebug(t *testing.T) {
-	flags := model.Flags(0)
-	flags.SetDebug()
-	assert.True(t, flags.IsDebug())
-	flags = model.Flags(0)
-	assert.False(t, flags.IsDebug())
-
-	flags = model.Flags(32)
-	assert.False(t, flags.IsDebug())
-	flags.SetDebug()
-	assert.True(t, flags.IsDebug())
-}
-
-func TestIsFirehoseEnabled(t *testing.T) {
-	flags := model.Flags(0)
-	assert.False(t, flags.IsFirehoseEnabled())
-	flags.SetDebug()
-	flags.SetSampled()
-	assert.False(t, flags.IsFirehoseEnabled())
-	flags.SetFirehose()
-	assert.True(t, flags.IsFirehoseEnabled())
-
-	flags = model.Flags(8)
-	assert.True(t, flags.IsFirehoseEnabled())
-}
-
 func TestGetSpanKind(t *testing.T) {
 	span := makeSpan(model.String("sampler.type", "lowerbound"))
 	spanKind, found := span.GetSpanKind()
-	assert.Equal(t, "", spanKind)
-	assert.Equal(t, false, found)
+	assert.Equal(t, model.SpanKindUnspecified, spanKind)
+	assert.False(t, found)
 
-	span = makeSpan(model.String("span.kind", "client"))
+	span = makeSpan(model.SpanKindTag("client"))
 	spanKind, found = span.GetSpanKind()
-	assert.Equal(t, "client", spanKind)
-	assert.Equal(t, true, found)
+	assert.Equal(t, model.SpanKindClient, spanKind)
+	assert.True(t, found)
 }
 
 func TestSamplerType(t *testing.T) {
 	span := makeSpan(model.String("sampler.type", "lowerbound"))
-	assert.Equal(t, "lowerbound", span.GetSamplerType())
+	assert.Equal(t, model.SamplerTypeLowerBound, span.GetSamplerType())
 	span = makeSpan(model.String("sampler.type", ""))
-	assert.Equal(t, "unknown", span.GetSamplerType())
+	assert.Equal(t, model.SamplerTypeUnrecognized, span.GetSamplerType())
+	span = makeSpan(model.String("sampler.type", "probabilistic"))
+	assert.Equal(t, model.SamplerTypeProbabilistic, span.GetSamplerType())
 	span = makeSpan(model.KeyValue{})
-	assert.Equal(t, "unknown", span.GetSamplerType())
-}
-
-func TestIsSampled(t *testing.T) {
-	flags := model.Flags(0)
-	flags.SetSampled()
-	assert.True(t, flags.IsSampled())
-	flags = model.Flags(0)
-	flags.SetDebug()
-	assert.False(t, flags.IsSampled())
+	assert.Equal(t, model.SamplerTypeUnrecognized, span.GetSamplerType())
 }
 
 func TestSpanHash(t *testing.T) {
@@ -276,6 +217,11 @@ func TestSpanHash(t *testing.T) {
 func TestParentSpanID(t *testing.T) {
 	span := makeSpan(model.String("k", "v"))
 	assert.Equal(t, model.NewSpanID(123), span.ParentSpanID())
+
+	span.References = []model.SpanRef{
+		model.NewFollowsFromRef(span.TraceID, model.NewSpanID(777)),
+	}
+	assert.Equal(t, model.NewSpanID(777), span.ParentSpanID())
 
 	span.References = []model.SpanRef{
 		model.NewFollowsFromRef(span.TraceID, model.NewSpanID(777)),
@@ -385,124 +331,4 @@ func BenchmarkBatchSerialization(b *testing.B) {
 			proto.Unmarshal(data, &batch2)
 		}
 	})
-}
-
-func TestGetSamplerParams(t *testing.T) {
-	logger := zap.NewNop()
-	tests := []struct {
-		tags          model.KeyValues
-		expectedType  string
-		expectedParam float64
-	}{
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "probabilistic"),
-				model.String("sampler.param", "1e-05"),
-			},
-			expectedType:  "probabilistic",
-			expectedParam: 0.00001,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "probabilistic"),
-				model.Float64("sampler.param", 0.10404450002098709),
-			},
-			expectedType:  "probabilistic",
-			expectedParam: 0.10404450002098709,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "probabilistic"),
-				model.String("sampler.param", "0.10404450002098709"),
-			},
-			expectedType:  "probabilistic",
-			expectedParam: 0.10404450002098709,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "probabilistic"),
-				model.Int64("sampler.param", 1),
-			},
-			expectedType:  "probabilistic",
-			expectedParam: 1.0,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "ratelimiting"),
-				model.String("sampler.param", "1"),
-			},
-			expectedType:  "ratelimiting",
-			expectedParam: 1,
-		},
-		{
-			tags: model.KeyValues{
-				model.Float64("sampler.type", 1.5),
-			},
-			expectedType:  "",
-			expectedParam: 0,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "probabilistic"),
-			},
-			expectedType:  "",
-			expectedParam: 0,
-		},
-		{
-			tags:          model.KeyValues{},
-			expectedType:  "",
-			expectedParam: 0,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "lowerbound"),
-				model.String("sampler.param", "1"),
-			},
-			expectedType:  "lowerbound",
-			expectedParam: 1,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "lowerbound"),
-				model.Int64("sampler.param", 1),
-			},
-			expectedType:  "lowerbound",
-			expectedParam: 1,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "lowerbound"),
-				model.Float64("sampler.param", 0.5),
-			},
-			expectedType:  "lowerbound",
-			expectedParam: 0.5,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "lowerbound"),
-				model.String("sampler.param", "not_a_number"),
-			},
-			expectedType:  "",
-			expectedParam: 0,
-		},
-		{
-			tags: model.KeyValues{
-				model.String("sampler.type", "not_a_type"),
-				model.String("sampler.param", "not_a_number"),
-			},
-			expectedType:  "",
-			expectedParam: 0,
-		},
-	}
-
-	for i, test := range tests {
-		tt := test
-		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
-			span := &model.Span{}
-			span.Tags = tt.tags
-			actualType, actualParam := span.GetSamplerParams(logger)
-			assert.Equal(t, tt.expectedType, actualType)
-			assert.Equal(t, tt.expectedParam, actualParam)
-		})
-	}
 }

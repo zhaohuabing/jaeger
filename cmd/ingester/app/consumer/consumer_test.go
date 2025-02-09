@@ -1,22 +1,11 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package consumer
 
 import (
 	"errors"
-	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -29,11 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	kmocks "github.com/jaegertracing/jaeger/cmd/ingester/app/consumer/mocks"
 	"github.com/jaegertracing/jaeger/cmd/ingester/app/processor"
 	pmocks "github.com/jaegertracing/jaeger/cmd/ingester/app/processor/mocks"
 	"github.com/jaegertracing/jaeger/internal/metricstest"
 	"github.com/jaegertracing/jaeger/pkg/kafka/consumer"
+	kmocks "github.com/jaegertracing/jaeger/pkg/kafka/consumer/mocks"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
 )
 
@@ -48,7 +37,7 @@ const (
 
 func TestConstructor(t *testing.T) {
 	newConsumer, err := New(Params{MetricsFactory: metrics.NullFactory})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, newConsumer)
 }
 
@@ -77,8 +66,9 @@ func newSaramaClusterConsumer(saramaPartitionConsumer sarama.PartitionConsumer, 
 	}
 	saramaClusterConsumer := &kmocks.Consumer{}
 	saramaClusterConsumer.On("Partitions").Return((<-chan cluster.PartitionConsumer)(pcha))
-	saramaClusterConsumer.On("Close").Return(nil).Run(func(args mock.Arguments) {
+	saramaClusterConsumer.On("Close").Return(nil).Run(func(_ mock.Arguments) {
 		mc.Close()
+		close(pcha)
 	})
 	saramaClusterConsumer.On("MarkPartitionOffset", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	return saramaClusterConsumer
@@ -87,21 +77,20 @@ func newSaramaClusterConsumer(saramaPartitionConsumer sarama.PartitionConsumer, 
 func newConsumer(
 	t *testing.T,
 	metricsFactory metrics.Factory,
-	topic string,
-	processor processor.SpanProcessor,
-	consumer consumer.Consumer,
+	_ string, /* topic */
+	proc processor.SpanProcessor,
+	cons consumer.Consumer,
 ) *Consumer {
 	logger, _ := zap.NewDevelopment()
 	consumerParams := Params{
 		MetricsFactory:   metricsFactory,
 		Logger:           logger,
-		InternalConsumer: consumer,
+		InternalConsumer: cons,
 		ProcessorFactory: ProcessorFactory{
-			topic:          topic,
-			consumer:       consumer,
+			consumer:       cons,
 			metricsFactory: metricsFactory,
 			logger:         logger,
-			baseProcessor:  processor,
+			baseProcessor:  proc,
 			parallelism:    1,
 		},
 	}
@@ -127,7 +116,7 @@ func TestSaramaConsumerWrapper_start_Messages(t *testing.T) {
 	isProcessed := sync.WaitGroup{}
 	isProcessed.Add(1)
 	mp := &pmocks.SpanProcessor{}
-	mp.On("Process", saramaMessageWrapper{msg}).Return(func(msg processor.Message) error {
+	mp.On("Process", saramaMessageWrapper{msg}).Return(func(_ processor.Message) error {
 		isProcessed.Done()
 		return nil
 	})
@@ -146,7 +135,7 @@ func TestSaramaConsumerWrapper_start_Messages(t *testing.T) {
 			partitionConsumer: &partitionConsumerWrapper{
 				topic:             topic,
 				partition:         partition,
-				PartitionConsumer: &kmocks.PartitionConsumer{},
+				PartitionConsumer: &smocks.PartitionConsumer{},
 			},
 		},
 	}
@@ -172,20 +161,23 @@ func TestSaramaConsumerWrapper_start_Messages(t *testing.T) {
 		Value: 0,
 	})
 
-	partitionTag := map[string]string{"partition": fmt.Sprint(partition)}
+	tags := map[string]string{
+		"topic":     topic,
+		"partition": strconv.Itoa(int(partition)),
+	}
 	localFactory.AssertCounterMetrics(t, metricstest.ExpectedMetric{
 		Name:  "sarama-consumer.messages",
-		Tags:  partitionTag,
+		Tags:  tags,
 		Value: 1,
 	})
 	localFactory.AssertGaugeMetrics(t, metricstest.ExpectedMetric{
 		Name:  "sarama-consumer.current-offset",
-		Tags:  partitionTag,
+		Tags:  tags,
 		Value: int(msgOffset),
 	})
 	localFactory.AssertGaugeMetrics(t, metricstest.ExpectedMetric{
 		Name: "sarama-consumer.offset-lag",
-		Tags: partitionTag,
+		Tags: tags,
 		// Prior to sarama v1.31.0 this would be 0, it's unclear why this changed.
 		// v=1 seems to be correct because high watermark in mock is incremented upon
 		// consuming the message, and func HighWaterMarkOffset() returns internal value
@@ -195,7 +187,7 @@ func TestSaramaConsumerWrapper_start_Messages(t *testing.T) {
 	})
 	localFactory.AssertCounterMetrics(t, metricstest.ExpectedMetric{
 		Name:  "sarama-consumer.partition-start",
-		Tags:  partitionTag,
+		Tags:  tags,
 		Value: 1,
 	})
 }
@@ -223,10 +215,13 @@ func TestSaramaConsumerWrapper_start_Errors(t *testing.T) {
 			continue
 		}
 
-		partitionTag := map[string]string{"partition": fmt.Sprint(partition)}
+		tags := map[string]string{
+			"topic":     topic,
+			"partition": strconv.Itoa(int(partition)),
+		}
 		localFactory.AssertCounterMetrics(t, metricstest.ExpectedMetric{
 			Name:  "sarama-consumer.errors",
-			Tags:  partitionTag,
+			Tags:  tags,
 			Value: 1,
 		})
 		undertest.Close()
@@ -255,7 +250,7 @@ func TestHandleClosePartition(t *testing.T) {
 		undertest.deadlockDetector.allPartitionsDeadlockDetector.incrementMsgCount() // Don't trigger panic on all partitions detector
 		time.Sleep(100 * time.Millisecond)
 		c, _ := metricsFactory.Snapshot()
-		if c["sarama-consumer.partition-close|partition=316"] == 1 {
+		if c["sarama-consumer.partition-close|partition=316|topic=morekuzambu"] == 1 {
 			return
 		}
 	}

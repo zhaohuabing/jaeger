@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package decorator
 
@@ -20,10 +9,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaegertracing/jaeger/cmd/ingester/app/processor/mocks"
 	"github.com/jaegertracing/jaeger/internal/metricstest"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
+	"github.com/jaegertracing/jaeger/pkg/testutils"
 )
 
 type fakeMsg struct{}
@@ -39,7 +30,7 @@ func TestNewRetryingProcessor(t *testing.T) {
 	lf := metricstest.NewFactory(0)
 	rp := NewRetryingProcessor(lf, mockProcessor)
 
-	assert.NoError(t, rp.Process(msg))
+	require.NoError(t, rp.Process(msg))
 
 	mockProcessor.AssertExpectations(t)
 	c, _ := lf.Snapshot()
@@ -61,7 +52,7 @@ func TestNewRetryingProcessorError(t *testing.T) {
 	lf := metricstest.NewFactory(0)
 	rp := NewRetryingProcessor(lf, mockProcessor, opts...)
 
-	assert.Error(t, rp.Process(msg))
+	require.Error(t, rp.Process(msg))
 
 	mockProcessor.AssertNumberOfCalls(t, "Process", 3)
 	c, _ := lf.Snapshot()
@@ -84,7 +75,7 @@ func TestNewRetryingProcessorNoErrorPropagation(t *testing.T) {
 	lf := metricstest.NewFactory(0)
 	rp := NewRetryingProcessor(lf, mockProcessor, opts...)
 
-	assert.NoError(t, rp.Process(msg))
+	require.NoError(t, rp.Process(msg))
 	mockProcessor.AssertNumberOfCalls(t, "Process", 2)
 	c, _ := lf.Snapshot()
 	assert.Equal(t, int64(1), c["span-processor.retry-exhausted"])
@@ -93,7 +84,7 @@ func TestNewRetryingProcessorNoErrorPropagation(t *testing.T) {
 
 type fakeRand struct{}
 
-func (f *fakeRand) Int63n(v int64) int64 {
+func (*fakeRand) Int63n(v int64) int64 {
 	return v
 }
 
@@ -132,7 +123,7 @@ func Test_ProcessBackoff(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, func(_ *testing.T) {
 			rd := &retryDecorator{
 				retryAttempts: metrics.NullCounter,
 				options: retryOptions{
@@ -144,4 +135,8 @@ func Test_ProcessBackoff(t *testing.T) {
 			assert.Equal(t, tt.expectedInterval, rd.computeInterval(tt.attempt))
 		})
 	}
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

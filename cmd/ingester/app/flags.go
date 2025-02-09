@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -23,9 +12,9 @@ import (
 
 	"github.com/spf13/viper"
 
+	"github.com/jaegertracing/jaeger/internal/storage/v1/kafka"
 	"github.com/jaegertracing/jaeger/pkg/kafka/auth"
 	kafkaConsumer "github.com/jaegertracing/jaeger/pkg/kafka/consumer"
-	"github.com/jaegertracing/jaeger/plugin/storage/kafka"
 )
 
 const (
@@ -39,6 +28,8 @@ const (
 	SuffixTopic = ".topic"
 	// SuffixRackID is a suffix for the consumer rack-id flag
 	SuffixRackID = ".rack-id"
+	// SuffixFetchMaxMessageBytes is a suffix for the consumer fetch-max-message-bytes flag
+	SuffixFetchMaxMessageBytes = ".fetch-max-message-bytes"
 	// SuffixGroupID is a suffix for the group-id flag
 	SuffixGroupID = ".group-id"
 	// SuffixClientID is a suffix for the client-id flag
@@ -67,6 +58,8 @@ const (
 	DefaultEncoding = kafka.EncodingProto
 	// DefaultDeadlockInterval is the default deadlock interval
 	DefaultDeadlockInterval = time.Duration(0)
+	// DefaultFetchMaxMessageBytes is the default for kafka.consumer.fetch-max-message-bytes flag
+	DefaultFetchMaxMessageBytes = 1024 * 1024 // 1MB
 )
 
 // Options stores the configuration options for the Ingester
@@ -117,6 +110,10 @@ func AddFlags(flagSet *flag.FlagSet) {
 		KafkaConsumerConfigPrefix+SuffixRackID,
 		"",
 		"Rack identifier for this client. This can be any string value which indicates where this client is located. It corresponds with the broker config `broker.rack`")
+	flagSet.Int(
+		KafkaConsumerConfigPrefix+SuffixFetchMaxMessageBytes,
+		DefaultFetchMaxMessageBytes,
+		"The maximum number of message bytes to fetch from the broker in a single request. So you must be sure this is at least as large as your largest message.")
 
 	auth.AddFlags(KafkaConsumerConfigPrefix, flagSet)
 }
@@ -130,6 +127,7 @@ func (o *Options) InitFromViper(v *viper.Viper) {
 	o.ProtocolVersion = v.GetString(KafkaConsumerConfigPrefix + SuffixProtocolVersion)
 	o.Encoding = v.GetString(KafkaConsumerConfigPrefix + SuffixEncoding)
 	o.RackID = v.GetString(KafkaConsumerConfigPrefix + SuffixRackID)
+	o.FetchMaxMessageBytes = v.GetInt32(KafkaConsumerConfigPrefix + SuffixFetchMaxMessageBytes)
 
 	o.Parallelism = v.GetInt(ConfigPrefix + SuffixParallelism)
 	o.DeadlockInterval = v.GetDuration(ConfigPrefix + SuffixDeadlockInterval)
@@ -140,5 +138,5 @@ func (o *Options) InitFromViper(v *viper.Viper) {
 
 // stripWhiteSpace removes all whitespace characters from a string
 func stripWhiteSpace(str string) string {
-	return strings.Replace(str, " ", "", -1)
+	return strings.ReplaceAll(str, " ", "")
 }

@@ -1,28 +1,18 @@
 // Copyright (c) 2021 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
+	"context"
 	"crypto/tls"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
-	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
 	"github.com/jaegertracing/jaeger/pkg/es/client"
 )
 
@@ -48,10 +38,9 @@ type Action interface {
 
 // ActionExecuteOptions are the options passed to the execute action function
 type ActionExecuteOptions struct {
-	Args     []string
-	Viper    *viper.Viper
-	Logger   *zap.Logger
-	TLSFlags tlscfg.ClientFlagsConfig
+	Args   []string
+	Viper  *viper.Viper
+	Logger *zap.Logger
 }
 
 // ActionCreatorFunction type is the function type in charge of create the action to be executed
@@ -61,15 +50,12 @@ type ActionCreatorFunction func(client.Client, Config) Action
 func ExecuteAction(opts ActionExecuteOptions, createAction ActionCreatorFunction) error {
 	cfg := Config{}
 	cfg.InitFromViper(opts.Viper)
-	tlsOpts, err := opts.TLSFlags.InitFromViper(opts.Viper)
+
+	ctx := context.Background()
+	tlsCfg, err := cfg.TLSConfig.LoadTLSConfig(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("TLS configuration failed: %w", err)
 	}
-	tlsCfg, err := tlsOpts.Config(opts.Logger)
-	if err != nil {
-		return err
-	}
-	defer tlsOpts.Close()
 
 	esClient := newESClient(opts.Args[0], &cfg, tlsCfg)
 	action := createAction(esClient, cfg)

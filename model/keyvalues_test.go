@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package model_test
 
@@ -21,8 +10,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 )
 
 func TestKeyValuesSort(t *testing.T) {
@@ -48,6 +38,29 @@ func TestKeyValuesSort(t *testing.T) {
 	}
 	input.Sort()
 	assert.Equal(t, expected, input)
+}
+
+func TestSpanKindFromString(t *testing.T) {
+	testCases := []struct {
+		input  string
+		output model.SpanKind
+		err    string
+	}{
+		{input: "client", output: model.SpanKindClient},
+		{input: "", output: model.SpanKindUnspecified},
+		{input: "foobar", output: model.SpanKindUnspecified, err: "unknown span kind"},
+	}
+	for _, test := range testCases {
+		t.Run(fmt.Sprintf("%+v", test), func(t *testing.T) {
+			v, err := model.SpanKindFromString(test.input)
+			if test.err != "" {
+				require.ErrorContains(t, err, test.err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, test.output, v)
+		})
+	}
 }
 
 func TestKeyValuesFindByKey(t *testing.T) {
@@ -77,15 +90,15 @@ func TestKeyValuesFindByKey(t *testing.T) {
 }
 
 func TestKeyValuesEqual(t *testing.T) {
-	v1 := model.String("s", "abc")
-	v2 := model.Int64("i", 123)
-	v3 := model.Float64("f", 123.4)
+	kv1 := model.String("s", "abc")
+	kv2 := model.Int64("i", 123)
+	kv3 := model.Float64("f", 123.4)
 	assert.True(t, model.KeyValues{}.Equal(model.KeyValues{}))
-	assert.True(t, model.KeyValues{v1}.Equal(model.KeyValues{v1}))
-	assert.True(t, model.KeyValues{v1, v2}.Equal(model.KeyValues{v1, v2}))
-	assert.False(t, model.KeyValues{v1, v2}.Equal(model.KeyValues{v2, v1}))
-	assert.False(t, model.KeyValues{v1, v2}.Equal(model.KeyValues{v1, v3}))
-	assert.False(t, model.KeyValues{v1, v2}.Equal(model.KeyValues{v1, v2, v3}))
+	assert.True(t, model.KeyValues{kv1}.Equal(model.KeyValues{kv1}))
+	assert.True(t, model.KeyValues{kv1, kv2}.Equal(model.KeyValues{kv1, kv2}))
+	assert.False(t, model.KeyValues{kv1, kv2}.Equal(model.KeyValues{kv2, kv1}))
+	assert.False(t, model.KeyValues{kv1, kv2}.Equal(model.KeyValues{kv1, kv3}))
+	assert.False(t, model.KeyValues{kv1, kv2}.Equal(model.KeyValues{kv1, kv2, kv3}))
 }
 
 func TestKeyValuesHashErrors(t *testing.T) {
@@ -105,30 +118,30 @@ func TestKeyValuesHashErrors(t *testing.T) {
 	w := &mockHashWwiter{
 		answers: make([]mockHashWwiterAnswer, 3),
 	}
-	assert.EqualError(t, kvs.Hash(w), "unknown type -1")
+	require.EqualError(t, kvs.Hash(w), "unknown type -1")
 }
 
 // No memory allocations for IsLess and Equal
 // 18.6 ns/op	       0 B/op	       0 allocs/op
 func BenchmarkKeyValueIsLessAndEquals(b *testing.B) {
-	v1 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
-	v2 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
+	kv1 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
+	kv2 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
 	for i := 0; i < b.N; i++ {
-		v1.IsLess(&v2)
-		v2.IsLess(&v1)
-		v1.Equal(&v2)
-		v2.Equal(&v1)
+		kv1.IsLess(&kv2)
+		kv2.IsLess(&kv1)
+		kv1.Equal(&kv2)
+		kv2.Equal(&kv1)
 	}
 }
 
 // No memory allocations for Sort (1 alloc comes from the algorithm, not from comparisons)
 // 107 ns/op	      32 B/op	       1 allocs/op
 func BenchmarkKeyValuesSort(b *testing.B) {
-	v1 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
-	v2 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
+	kv1 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
+	kv2 := model.KeyValue{Key: "x", VType: model.ValueType(-1)}
 	list := model.KeyValues(make([]model.KeyValue, 5))
 	for i := 0; i < b.N; i++ {
-		list[0], list[1], list[2], list[3], list[4] = v2, v1, v2, v1, v2
+		list[0], list[1], list[2], list[3], list[4] = kv2, kv1, kv2, kv1, kv2
 		list.Sort()
 	}
 }

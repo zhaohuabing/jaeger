@@ -1,20 +1,10 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package anonymizer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -25,19 +15,21 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	uiconv "github.com/jaegertracing/jaeger/model/converter/json"
 	uimodel "github.com/jaegertracing/jaeger/model/json"
 )
 
 var allowedTags = map[string]bool{
-	"error":            true,
-	"span.kind":        true,
-	"http.method":      true,
-	"http.status_code": true,
-	"sampler.type":     true,
-	"sampler.param":    true,
+	"error":               true,
+	"http.method":         true,
+	"http.status_code":    true,
+	model.SpanKindKey:     true,
+	model.SamplerTypeKey:  true,
+	model.SamplerParamKey: true,
 }
+
+const PermUserRW = 0o600 // Read-write for owner only
 
 // mapping stores the mapping of service/operation names to their one-way hashes,
 // so that we can do a reverse lookup should the researchers have questions.
@@ -57,6 +49,8 @@ type Anonymizer struct {
 	lock        sync.Mutex
 	mapping     mapping
 	options     Options
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 // Options represents the various options with which the anonymizer can be configured.
@@ -70,6 +64,7 @@ type Options struct {
 // New creates new Anonymizer. The mappingFile stores the mapping from original to
 // obfuscated strings, in case later investigations require looking at the original traces.
 func New(mappingFile string, options Options, logger *zap.Logger) *Anonymizer {
+	ctx, cancel := context.WithCancel(context.Background())
 	a := &Anonymizer{
 		mappingFile: mappingFile,
 		logger:      logger,
@@ -78,6 +73,7 @@ func New(mappingFile string, options Options, logger *zap.Logger) *Anonymizer {
 			Operations: make(map[string]string),
 		},
 		options: options,
+		cancel:  cancel,
 	}
 	if _, err := os.Stat(filepath.Clean(mappingFile)); err == nil {
 		dat, err := os.ReadFile(filepath.Clean(mappingFile))
@@ -88,12 +84,26 @@ func New(mappingFile string, options Options, logger *zap.Logger) *Anonymizer {
 			logger.Fatal("Cannot unmarshal previous mapping", zap.Error(err))
 		}
 	}
+	a.wg.Add(1)
 	go func() {
-		for range time.NewTicker(10 * time.Second).C {
-			a.SaveMapping()
+		defer a.wg.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				a.SaveMapping()
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	return a
+}
+
+func (a *Anonymizer) Stop() {
+	a.cancel()
+	a.wg.Wait()
 }
 
 // SaveMapping writes the mapping from original to obfuscated strings to a file.
@@ -107,7 +117,7 @@ func (a *Anonymizer) SaveMapping() {
 		a.logger.Error("Failed to marshal mapping file", zap.Error(err))
 		return
 	}
-	if err := os.WriteFile(filepath.Clean(a.mappingFile), dat, os.ModePerm); err != nil {
+	if err := os.WriteFile(filepath.Clean(a.mappingFile), dat, PermUserRW); err != nil {
 		a.logger.Error("Failed to write mapping file", zap.Error(err))
 		return
 	}

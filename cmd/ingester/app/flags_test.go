@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -21,11 +10,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configtls"
 
+	"github.com/jaegertracing/jaeger/internal/storage/v1/kafka"
 	"github.com/jaegertracing/jaeger/pkg/config"
-	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
 	"github.com/jaegertracing/jaeger/pkg/kafka/auth"
-	"github.com/jaegertracing/jaeger/plugin/storage/kafka"
+	"github.com/jaegertracing/jaeger/pkg/testutils"
 )
 
 func TestOptionsWithFlags(t *testing.T) {
@@ -37,6 +27,7 @@ func TestOptionsWithFlags(t *testing.T) {
 		"--kafka.consumer.group-id=group1",
 		"--kafka.consumer.client-id=client-id1",
 		"--kafka.consumer.rack-id=rack1",
+		"--kafka.consumer.fetch-max-message-bytes=10485760",
 		"--kafka.consumer.encoding=json",
 		"--kafka.consumer.protocol-version=1.0.0",
 		"--ingester.parallelism=5",
@@ -48,6 +39,7 @@ func TestOptionsWithFlags(t *testing.T) {
 	assert.Equal(t, []string{"127.0.0.1:9092", "0.0.0:1234"}, o.Brokers)
 	assert.Equal(t, "group1", o.GroupID)
 	assert.Equal(t, "rack1", o.RackID)
+	assert.Equal(t, int32(10485760), o.FetchMaxMessageBytes)
 	assert.Equal(t, "client-id1", o.ClientID)
 	assert.Equal(t, "1.0.0", o.ProtocolVersion)
 	assert.Equal(t, 5, o.Parallelism)
@@ -72,15 +64,21 @@ func TestTLSFlags(t *testing.T) {
 		},
 		{
 			flags:    []string{"--kafka.consumer.authentication=kerberos", "--kafka.consumer.tls.enabled=true"},
-			expected: auth.AuthenticationConfig{Authentication: "kerberos", Kerberos: kerb, TLS: tlscfg.Options{Enabled: true}, PlainText: plain},
+			expected: auth.AuthenticationConfig{Authentication: "kerberos", Kerberos: kerb, PlainText: plain},
 		},
 		{
-			flags:    []string{"--kafka.consumer.authentication=tls"},
-			expected: auth.AuthenticationConfig{Authentication: "tls", Kerberos: kerb, TLS: tlscfg.Options{Enabled: true}, PlainText: plain},
-		},
-		{
-			flags:    []string{"--kafka.consumer.authentication=tls", "--kafka.consumer.tls.enabled=false"},
-			expected: auth.AuthenticationConfig{Authentication: "tls", Kerberos: kerb, TLS: tlscfg.Options{Enabled: true}, PlainText: plain},
+			flags: []string{"--kafka.consumer.authentication=tls"},
+			expected: auth.AuthenticationConfig{
+				Authentication: "tls",
+				Kerberos:       kerb,
+				// TODO this test is unclear - if tls.enabled != true, why is it not tls.Insecure=true?
+				TLS: configtls.ClientConfig{
+					Config: configtls.Config{
+						IncludeSystemCACertsPool: true,
+					},
+				},
+				PlainText: plain,
+			},
 		},
 	}
 
@@ -107,6 +105,11 @@ func TestFlagDefaults(t *testing.T) {
 	assert.Equal(t, DefaultGroupID, o.GroupID)
 	assert.Equal(t, DefaultClientID, o.ClientID)
 	assert.Equal(t, DefaultParallelism, o.Parallelism)
+	assert.Equal(t, int32(DefaultFetchMaxMessageBytes), o.FetchMaxMessageBytes)
 	assert.Equal(t, DefaultEncoding, o.Encoding)
 	assert.Equal(t, DefaultDeadlockInterval, o.DeadlockInterval)
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

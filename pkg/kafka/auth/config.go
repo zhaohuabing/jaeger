@@ -1,16 +1,5 @@
 // Copyright (c) 2019 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package auth
 
@@ -20,6 +9,7 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/collector/config/configtls"
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
@@ -41,10 +31,10 @@ var authTypes = []string{
 
 // AuthenticationConfig describes the configuration properties needed authenticate with kafka cluster
 type AuthenticationConfig struct {
-	Authentication string          `mapstructure:"type"`
-	Kerberos       KerberosConfig  `mapstructure:"kerberos"`
-	TLS            tlscfg.Options  `mapstructure:"tls"`
-	PlainText      PlainTextConfig `mapstructure:"plaintext"`
+	Authentication string
+	Kerberos       KerberosConfig
+	TLS            configtls.ClientConfig
+	PlainText      PlainTextConfig
 }
 
 // SetConfiguration set configure authentication into sarama config structure
@@ -53,9 +43,8 @@ func (config *AuthenticationConfig) SetConfiguration(saramaConfig *sarama.Config
 	if strings.Trim(authentication, " ") == "" {
 		authentication = none
 	}
-	if config.Authentication == tls || config.TLS.Enabled {
-		err := setTLSConfiguration(&config.TLS, saramaConfig, logger)
-		if err != nil {
+	if config.Authentication == tls {
+		if err := setTLSConfiguration(&config.TLS, saramaConfig, logger); err != nil {
 			return err
 		}
 	}
@@ -84,18 +73,20 @@ func (config *AuthenticationConfig) InitFromViper(configPrefix string, v *viper.
 	config.Kerberos.Password = v.GetString(configPrefix + kerberosPrefix + suffixKerberosPassword)
 	config.Kerberos.ConfigPath = v.GetString(configPrefix + kerberosPrefix + suffixKerberosConfig)
 	config.Kerberos.KeyTabPath = v.GetString(configPrefix + kerberosPrefix + suffixKerberosKeyTab)
+	config.Kerberos.DisablePAFXFast = v.GetBool(configPrefix + kerberosPrefix + suffixKerberosDisablePAFXFAST)
 
-	tlsClientConfig := tlscfg.ClientFlagsConfig{
-		Prefix: configPrefix,
-	}
-
-	var err error
-	config.TLS, err = tlsClientConfig.InitFromViper(v)
-	if err != nil {
-		return fmt.Errorf("failed to process Kafka TLS options: %w", err)
-	}
 	if config.Authentication == tls {
-		config.TLS.Enabled = true
+		if !v.IsSet(configPrefix + ".tls.enabled") {
+			v.Set(configPrefix+".tls.enabled", "true")
+		}
+		tlsClientConfig := tlscfg.ClientFlagsConfig{
+			Prefix: configPrefix,
+		}
+		tlsCfg, err := tlsClientConfig.InitFromViper(v)
+		if err != nil {
+			return fmt.Errorf("failed to process Kafka TLS options: %w", err)
+		}
+		config.TLS = tlsCfg
 	}
 
 	config.PlainText.Username = v.GetString(configPrefix + plainTextPrefix + suffixPlainTextUsername)

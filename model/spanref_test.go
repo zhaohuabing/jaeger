@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package model_test
 
@@ -21,8 +10,9 @@ import (
 
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 )
 
 func TestSpanRefTypeToFromJSON(t *testing.T) {
@@ -36,17 +26,14 @@ func TestSpanRefTypeToFromJSON(t *testing.T) {
 	}
 	out := new(bytes.Buffer)
 	err := new(jsonpb.Marshaler).Marshal(out, &sr)
-	assert.NoError(t, err)
-	assert.Equal(t, `{"traceId":"AAAAAAAAAAAAAAAAAAAAQg==","spanId":"AAAAAAAAAEM=","refType":"FOLLOWS_FROM"}`, out.String())
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"traceId":"AAAAAAAAAAAAAAAAAAAAQg==","spanId":"AAAAAAAAAEM=","refType":"FOLLOWS_FROM"}`, out.String())
 	var sr2 model.SpanRef
-	if assert.NoError(t, jsonpb.Unmarshal(out, &sr2)) {
-		assert.Equal(t, sr, sr2)
-	}
+	require.NoError(t, jsonpb.Unmarshal(out, &sr2))
+	assert.Equal(t, sr, sr2)
 	var sr3 model.SpanRef
 	err = jsonpb.Unmarshal(bytes.NewReader([]byte(`{"refType":"BAD"}`)), &sr3)
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "unknown value")
-	}
+	assert.ErrorContains(t, err, "unknown value")
 }
 
 func TestMaybeAddParentSpanID(t *testing.T) {
