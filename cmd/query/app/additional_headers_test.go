@@ -1,16 +1,5 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -20,30 +9,32 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configopaque"
 )
 
-func TestAdditionalHeadersHandler(t *testing.T) {
-	additionalHeaders := http.Header{}
-	additionalHeaders.Add("Access-Control-Allow-Origin", "https://mozilla.org")
-	additionalHeaders.Add("Access-Control-Expose-Headers", "X-My-Custom-Header")
-	additionalHeaders.Add("Access-Control-Expose-Headers", "X-Another-Custom-Header")
-	additionalHeaders.Add("Access-Control-Request-Headers", "field1, field2")
+func TestResponseHeadersHandler(t *testing.T) {
+	responseHeaders := make(map[string]configopaque.String)
+	responseHeaders["Access-Control-Allow-Origin"] = "https://mozilla.org"
+	responseHeaders["Access-Control-Expose-Headers"] = "X-My-Custom-Header"
+	responseHeaders["Access-Control-Expose-Headers"] = "X-Another-Custom-Header"
+	responseHeaders["Access-Control-Request-Headers"] = "field1, field2"
 
-	emptyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	emptyHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte{})
 	})
 
-	handler := additionalHeadersHandler(emptyHandler, additionalHeaders)
+	handler := responseHeadersHandler(emptyHandler, responseHeaders)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	req, err := http.NewRequest("GET", server.URL, nil)
-	assert.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
 
 	resp, err := server.Client().Do(req)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	for k, v := range additionalHeaders {
-		assert.Equal(t, v, resp.Header[k])
+	for k, v := range responseHeaders {
+		assert.Equal(t, []string{v.String()}, resp.Header[k])
 	}
 }

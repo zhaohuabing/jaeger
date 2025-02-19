@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -19,10 +8,14 @@ import (
 	"strings"
 	"sync"
 
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/processor"
-	"github.com/jaegertracing/jaeger/model"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
 	"github.com/jaegertracing/jaeger/pkg/normalizer"
+	"github.com/jaegertracing/jaeger/pkg/otelsemconv"
 )
 
 const (
@@ -32,23 +25,31 @@ const (
 	// otherServices is the catch-all label when number of services exceeds maxServiceNames
 	otherServices = "other-services"
 
-	samplerTypeKey           = "sampler_type"
-	samplerTypeConst         = "const"
-	samplerTypeProbabilistic = "probabilistic"
-	samplerTypeRateLimiting  = "ratelimiting"
-	samplerTypeLowerBound    = "lowerbound"
-	samplerTypeUnknown       = "unknown"
-	// types of samplers: const, probabilistic, ratelimiting, lowerbound
-	numOfSamplerTypes = 4
+	// samplerTypeKey is the name of the metric tag showing sampler type
+	samplerTypeKey = "sampler_type"
 
 	concatenation = "$_$"
 
-	otherServicesConstSampler         = otherServices + concatenation + samplerTypeConst
-	otherServicesProbabilisticSampler = otherServices + concatenation + samplerTypeProbabilistic
-	otherServicesRateLimitingSampler  = otherServices + concatenation + samplerTypeRateLimiting
-	otherServicesLowerBoundSampler    = otherServices + concatenation + samplerTypeLowerBound
-	otherServicesUnknownSampler       = otherServices + concatenation + samplerTypeUnknown
+	// unknownServiceName is used when a span has no service name
+	unknownServiceName = "__unknown"
 )
+
+var otherServicesSamplers map[model.SamplerType]string = initOtherServicesSamplers()
+
+func initOtherServicesSamplers() map[model.SamplerType]string {
+	samplers := []model.SamplerType{
+		model.SamplerTypeUnrecognized,
+		model.SamplerTypeProbabilistic,
+		model.SamplerTypeLowerBound,
+		model.SamplerTypeRateLimiting,
+		model.SamplerTypeConst,
+	}
+	m := make(map[model.SamplerType]string)
+	for _, s := range samplers {
+		m[s] = otherServices + concatenation + s.String()
+	}
+	return m
+}
 
 // SpanProcessorMetrics contains all the necessary metrics for the SpanProcessor
 type SpanProcessorMetrics struct {
@@ -149,18 +150,19 @@ func newMetricsBySvc(factory metrics.Factory, category string) metricsBySvc {
 }
 
 func newTraceCountsBySvc(factory metrics.Factory, category string, maxServices int) traceCountsBySvc {
+	extraSlotsForOtherServicesSamples := len(otherServicesSamplers) - 1 // excluding UnrecognizedSampler
 	return traceCountsBySvc{
 		countsBySvc: countsBySvc{
 			counts:          newTraceCountsOtherServices(factory, category, "false"),
 			debugCounts:     newTraceCountsOtherServices(factory, category, "true"),
 			factory:         factory,
 			lock:            &sync.Mutex{},
-			maxServiceNames: maxServices + numOfSamplerTypes, // numOfSamplerType is the offset added to maxServices threshold
+			maxServiceNames: maxServices + extraSlotsForOtherServicesSamples,
 			category:        category,
 		},
 		// use sync.Pool to reduce allocation of stringBuilder
 		stringBuilderPool: &sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				return new(strings.Builder)
 			},
 		},
@@ -168,13 +170,19 @@ func newTraceCountsBySvc(factory metrics.Factory, category string, maxServices i
 }
 
 func newTraceCountsOtherServices(factory metrics.Factory, category string, isDebug string) map[string]metrics.Counter {
-	return map[string]metrics.Counter{
-		otherServicesConstSampler:         factory.Counter(metrics.Options{Name: category, Tags: map[string]string{"svc": otherServices, "debug": isDebug, samplerTypeKey: samplerTypeConst}}),
-		otherServicesLowerBoundSampler:    factory.Counter(metrics.Options{Name: category, Tags: map[string]string{"svc": otherServices, "debug": isDebug, samplerTypeKey: samplerTypeLowerBound}}),
-		otherServicesProbabilisticSampler: factory.Counter(metrics.Options{Name: category, Tags: map[string]string{"svc": otherServices, "debug": isDebug, samplerTypeKey: samplerTypeProbabilistic}}),
-		otherServicesRateLimitingSampler:  factory.Counter(metrics.Options{Name: category, Tags: map[string]string{"svc": otherServices, "debug": isDebug, samplerTypeKey: samplerTypeRateLimiting}}),
-		otherServicesUnknownSampler:       factory.Counter(metrics.Options{Name: category, Tags: map[string]string{"svc": otherServices, "debug": isDebug, samplerTypeKey: samplerTypeUnknown}}),
+	m := make(map[string]metrics.Counter)
+	for kSampler, vString := range otherServicesSamplers {
+		m[vString] = factory.Counter(
+			metrics.Options{
+				Name: category,
+				Tags: map[string]string{
+					"svc":          otherServices,
+					"debug":        isDebug,
+					samplerTypeKey: kSampler.String(),
+				},
+			})
 	}
+	return m
 }
 
 func newSpanCountsBySvc(factory metrics.Factory, category string, maxServiceNames int) spanCountsBySvc {
@@ -220,12 +228,12 @@ func (m *SpanProcessorMetrics) GetCountsForFormat(spanFormat processor.SpanForma
 	return t
 }
 
-// reportServiceNameForSpan determines the name of the service that emitted
+// ForSpanV1 determines the name of the service that emitted
 // the span and reports a counter stat.
-func (m metricsBySvc) ReportServiceNameForSpan(span *model.Span) {
+func (m metricsBySvc) ForSpanV1(span *model.Span) {
 	var serviceName string
 	if nil == span.Process || len(span.Process.ServiceName) == 0 {
-		serviceName = "__unknown"
+		serviceName = unknownServiceName
 	} else {
 		serviceName = span.Process.ServiceName
 	}
@@ -237,6 +245,20 @@ func (m metricsBySvc) ReportServiceNameForSpan(span *model.Span) {
 	}
 }
 
+// ForSpanV2 determines the name of the service that emitted
+// the span and reports a counter stat.
+func (m metricsBySvc) ForSpanV2(resource pcommon.Resource, span ptrace.Span) {
+	serviceName := unknownServiceName
+	if v, ok := resource.Attributes().Get(string(otelsemconv.ServiceNameKey)); ok {
+		serviceName = v.AsString()
+	}
+
+	m.countSpansByServiceName(serviceName, false)
+	if span.ParentSpanID().IsEmpty() {
+		m.countTracesByServiceName(serviceName, false, model.SamplerTypeUnrecognized)
+	}
+}
+
 // countSpansByServiceName counts how many spans are received per service.
 func (m metricsBySvc) countSpansByServiceName(serviceName string, isDebug bool) {
 	m.spans.countByServiceName(serviceName, isDebug)
@@ -244,7 +266,7 @@ func (m metricsBySvc) countSpansByServiceName(serviceName string, isDebug bool) 
 
 // countTracesByServiceName counts how many traces are received per service,
 // i.e. the counter is only incremented for the root spans.
-func (m metricsBySvc) countTracesByServiceName(serviceName string, isDebug bool, samplerType string) {
+func (m metricsBySvc) countTracesByServiceName(serviceName string, isDebug bool, samplerType model.SamplerType) {
 	m.traces.countByServiceName(serviceName, isDebug, samplerType)
 }
 
@@ -258,7 +280,7 @@ func (m metricsBySvc) countTracesByServiceName(serviceName string, isDebug bool,
 // total number of stored counters, so if it exceeds say the 90% threshold
 // an alert should be raised to investigate what's causing so many unique
 // service names.
-func (m *traceCountsBySvc) countByServiceName(serviceName string, isDebug bool, samplerType string) {
+func (m *traceCountsBySvc) countByServiceName(serviceName string, isDebug bool, samplerType model.SamplerType) {
 	serviceName = normalizer.ServiceName(serviceName)
 	counts := m.counts
 	if isDebug {
@@ -268,7 +290,7 @@ func (m *traceCountsBySvc) countByServiceName(serviceName string, isDebug bool, 
 	m.lock.Lock()
 
 	// trace counter key is combination of serviceName and samplerType.
-	key := m.buildKey(serviceName, samplerType)
+	key := m.buildKey(serviceName, samplerType.String())
 
 	if c, ok := counts[key]; ok {
 		counter = c
@@ -278,24 +300,17 @@ func (m *traceCountsBySvc) countByServiceName(serviceName string, isDebug bool, 
 			debugStr = "true"
 		}
 		// Only trace metrics have samplerType tag
-		tags := map[string]string{"svc": serviceName, "debug": debugStr, samplerTypeKey: samplerType}
+		tags := map[string]string{"svc": serviceName, "debug": debugStr, samplerTypeKey: samplerType.String()}
 
 		c := m.factory.Counter(metrics.Options{Name: m.category, Tags: tags})
 		counts[key] = c
 		counter = c
 	} else {
-		switch samplerType {
-		case samplerTypeConst:
-			counter = counts[otherServicesConstSampler]
-		case samplerTypeLowerBound:
-			counter = counts[otherServicesLowerBoundSampler]
-		case samplerTypeProbabilistic:
-			counter = counts[otherServicesProbabilisticSampler]
-		case samplerTypeRateLimiting:
-			counter = counts[otherServicesRateLimitingSampler]
-		default:
-			counter = counts[otherServicesUnknownSampler]
+		otherServicesSampler, ok := otherServicesSamplers[samplerType]
+		if !ok {
+			otherServicesSampler = otherServicesSamplers[model.SamplerTypeUnrecognized]
 		}
+		counter = counts[otherServicesSampler]
 	}
 	m.lock.Unlock()
 	counter.Inc(1)

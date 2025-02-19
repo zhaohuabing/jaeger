@@ -1,22 +1,10 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package services
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,35 +12,42 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/jaegertracing/jaeger/thrift-gen/sampling"
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
+	p2json "github.com/jaegertracing/jaeger/model/converter/json"
 )
 
 var errSamplingRateMissing = errors.New("sampling rate is missing")
 
-// AgentService is the service used to report traces to the collector.
-type AgentService interface {
+// CollectorService is the service used to report traces to the collector.
+type CollectorService interface {
 	GetSamplingRate(service, operation string) (float64, error)
 }
 
-type agentService struct {
+type collectorService struct {
 	url    string
 	logger *zap.Logger
 }
 
-// NewAgentService returns an instance of AgentService.
-func NewAgentService(url string, logger *zap.Logger) AgentService {
-	return &agentService{
+// NewCollectorService returns an instance of CollectorService.
+func NewCollectorService(url string, logger *zap.Logger) CollectorService {
+	logger.Info("Initializing Collector Service",
+		zap.String("url", url))
+	return &collectorService{
 		url:    url,
 		logger: logger,
 	}
 }
 
 func getSamplingURL(url string) string {
-	return url + "/sampling?service=%s"
+	return url + "/api/sampling?service=%s"
 }
 
 // GetSamplingRate returns the sampling rate for the service-operation from the agent service.
-func (s *agentService) GetSamplingRate(service, operation string) (float64, error) {
+func (s *collectorService) GetSamplingRate(service, operation string) (float64, error) {
+	s.logger.Info("Getting sampling rate",
+		zap.String("url", s.url),
+		zap.String("service", service),
+		zap.String("operation", operation))
 	url := fmt.Sprintf(getSamplingURL(s.url), getTracerServiceName(service))
 	resp, err := http.Get(url)
 	if err != nil {
@@ -63,16 +58,16 @@ func (s *agentService) GetSamplingRate(service, operation string) (float64, erro
 	if err != nil {
 		return 0, err
 	}
-	s.logger.Info("Retrieved sampling rates from agent", zap.String("body", string(body)))
+	s.logger.Info("Retrieved sampling rates from collector", zap.String("body", string(body)))
 
-	var response sampling.SamplingStrategyResponse
-	if err = json.Unmarshal(body, &response); err != nil {
+	response, err := p2json.SamplingStrategyResponseFromJSON(body)
+	if err != nil {
 		return 0, err
 	}
-	return getSamplingRate(operation, &response)
+	return getSamplingRate(operation, response)
 }
 
-func getSamplingRate(operation string, response *sampling.SamplingStrategyResponse) (float64, error) {
+func getSamplingRate(operation string, response *api_v2.SamplingStrategyResponse) (float64, error) {
 	if response.OperationSampling == nil {
 		return 0, errSamplingRateMissing
 	}

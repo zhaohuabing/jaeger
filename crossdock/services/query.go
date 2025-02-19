@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package services
 
@@ -40,15 +29,15 @@ type queryService struct {
 }
 
 // NewQueryService returns an instance of QueryService.
-func NewQueryService(url string, logger *zap.Logger) QueryService {
+func NewQueryService(serviceURL string, logger *zap.Logger) QueryService {
 	return &queryService{
-		url:    url,
+		url:    serviceURL,
 		logger: logger,
 	}
 }
 
-func getTraceURL(url string) string {
-	return url + "/api/traces?%s"
+func getTraceURL(traceURL string) string {
+	return traceURL + "/api/traces?%s"
 }
 
 type response struct {
@@ -65,8 +54,8 @@ func (s *queryService) GetTraces(serviceName, operation string, tags map[string]
 	for k, v := range tags {
 		values.Add("tag", k+":"+v)
 	}
-	url := fmt.Sprintf(getTraceURL(s.url), values.Encode())
-	resp, err := http.Get(url)
+	fmtURL := fmt.Sprintf(getTraceURL(s.url), values.Encode())
+	resp, err := http.Get(fmtURL)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +64,7 @@ func (s *queryService) GetTraces(serviceName, operation string, tags map[string]
 	if err != nil {
 		return nil, err
 	}
-	s.logger.Info("GetTraces: received response from query", zap.String("body", string(body)), zap.String("url", url))
+	s.logger.Info("GetTraces: received response from query", zap.String("body", string(body)), zap.String("url", fmtURL))
 
 	var queryResponse response
 	if err = json.Unmarshal(body, &queryResponse); err != nil {

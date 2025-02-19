@@ -1,0 +1,61 @@
+name: CIT OpenSearch
+
+on:
+  workflow_call:
+
+concurrency:
+  group: cit-opensearch-${{ github.workflow }}-${{ (github.event.pull_request && github.event.pull_request.number) || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+# See https://github.com/ossf/scorecard/blob/main/docs/checks.md#token-permissions
+permissions:  # added using https://github.com/step-security/secure-workflows
+  contents: read
+
+jobs:
+  opensearch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+        - major: 1.x
+          distribution: opensearch
+          jaeger: v1
+        - major: 2.x
+          distribution: opensearch
+          jaeger: v1
+        - major: 2.x
+          distribution: opensearch
+          jaeger: v2
+    name: ${{ matrix.version.distribution }} ${{ matrix.version.major }} ${{ matrix.version.jaeger }}
+    steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+      with:
+        egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+    - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4.2.0
+      with:
+        submodules: true
+
+    - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      with:
+        go-version: 1.24.x
+
+    - uses: docker/setup-qemu-action@53851d14592bedcffcf25ea515637cff71ef929a # v3.3.0
+
+    - name: Run ${{ matrix.version.distribution }} integration tests
+      id: test-execution
+      run: bash scripts/e2e/elasticsearch.sh ${{ matrix.version.distribution }} ${{ matrix.version.major }} ${{ matrix.version.jaeger }}
+
+    - uses: ./.github/actions/verify-metrics-snapshot
+      if: matrix.version.jaeger == 'v2'
+      with:
+        snapshot: metrics_snapshot_opensearch
+        artifact_key: metrics_snapshot_opensearch_${{ matrix.version.major }}
+
+    - name: Upload coverage to codecov
+      uses: ./.github/actions/upload-codecov
+      with:
+        files: cover.out,cover-index-cleaner.out,cover-index-rollover.out
+        flags: ${{ matrix.version.distribution }}-${{ matrix.version.major }}-${{ matrix.version.jaeger }}

@@ -1,22 +1,11 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package testutils
 
 import (
-	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -28,7 +17,7 @@ func TestNewLogger(t *testing.T) {
 	logger, log := NewLogger()
 	logger.Warn("hello", zap.String("x", "y"))
 
-	assert.Equal(t, `{"level":"warn","msg":"hello","x":"y"}`, log.Lines()[0])
+	assert.JSONEq(t, `{"level":"warn","msg":"hello","x":"y"}`, log.Lines()[0])
 	assert.Equal(t, map[string]string{
 		"level": "warn",
 		"msg":   "hello",
@@ -49,7 +38,7 @@ func TestJSONLineError(t *testing.T) {
 }
 
 // NB. Run with -race to ensure no race condition
-func TestRaceCondition(t *testing.T) {
+func TestRaceCondition(*testing.T) {
 	logger, buffer := NewLogger()
 
 	start := make(chan struct{})
@@ -90,7 +79,7 @@ func TestLogMatcher(t *testing.T) {
 	}
 	for i, tt := range tests {
 		test := tt
-		t.Run(fmt.Sprintf("%v", i), func(t *testing.T) {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			match, errMsg := LogMatcher(test.occurrences, test.subStr, test.logs)
 			assert.Equal(t, test.expected, match)
 			assert.Equal(t, test.errMsg, errMsg)

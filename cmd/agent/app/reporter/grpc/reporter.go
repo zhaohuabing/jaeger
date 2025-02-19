@@ -1,35 +1,25 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package grpc
 
 import (
 	"context"
+	"fmt"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
+	thrift "github.com/jaegertracing/jaeger-idl/thrift-gen/jaeger"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/zipkincore"
 	zipkin2 "github.com/jaegertracing/jaeger/cmd/collector/app/sanitizer/zipkin"
-	"github.com/jaegertracing/jaeger/model"
 	jConverter "github.com/jaegertracing/jaeger/model/converter/thrift/jaeger"
 	"github.com/jaegertracing/jaeger/model/converter/thrift/zipkin"
-	"github.com/jaegertracing/jaeger/proto-gen/api_v2"
-	thrift "github.com/jaegertracing/jaeger/thrift-gen/jaeger"
-	"github.com/jaegertracing/jaeger/thrift-gen/zipkincore"
 )
 
 // Reporter reports data to collector over gRPC.
@@ -79,11 +69,12 @@ func (r *Reporter) send(ctx context.Context, spans []*model.Span, process *model
 		} else {
 			r.logger.Error("Could not send spans over gRPC", zap.Error(err))
 		}
+		err = fmt.Errorf("failed to export spans: %w", err)
 	}
 	return err
 }
 
-// addTags appends jaeger tags for the agent to every span it sends to the collector.
+// addProcessTags appends jaeger tags for the agent to every span it sends to the collector.
 func addProcessTags(spans []*model.Span, process *model.Process, agentTags []model.KeyValue) ([]*model.Span, *model.Process) {
 	if len(agentTags) == 0 {
 		return spans, process

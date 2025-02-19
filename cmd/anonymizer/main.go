@@ -1,22 +1,13 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -38,7 +29,7 @@ func main() {
 		Use:   "jaeger-anonymizer",
 		Short: "Jaeger anonymizer hashes fields of a trace for easy sharing",
 		Long:  `Jaeger anonymizer queries Jaeger query for a trace, anonymizes fields, and store in file`,
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ /* args */ []string) {
 			prefix := options.OutputDir + "/" + options.TraceID
 			conf := writer.Config{
 				MaxSpansCount:  options.MaxSpansCount,
@@ -53,7 +44,7 @@ func main() {
 				},
 			}
 
-			writer, err := writer.New(conf, logger)
+			w, err := writer.New(conf, logger)
 			if err != nil {
 				logger.Fatal("error while creating writer object", zap.Error(err))
 			}
@@ -63,15 +54,28 @@ func main() {
 				logger.Fatal("error while creating query object", zap.Error(err))
 			}
 
-			spans, err := query.QueryTrace(options.TraceID)
+			spans, err := query.QueryTrace(
+				options.TraceID,
+				initTime(options.StartTime),
+				initTime(options.EndTime),
+			)
 			if err != nil {
 				logger.Fatal("error while querying for trace", zap.Error(err))
 			}
+			if err := query.Close(); err != nil {
+				logger.Error("Failed to close grpc client connection", zap.Error(err))
+			}
 
 			for _, span := range spans {
-				writer.WriteSpan(&span)
+				if err := w.WriteSpan(&span); err != nil {
+					if errors.Is(err, writer.ErrMaxSpansCountReached) {
+						logger.Info("max spans count reached")
+						os.Exit(0)
+					}
+					logger.Error("error while writing span", zap.Error(err))
+				}
 			}
-			writer.Close()
+			w.Close()
 
 			uiCfg := uiconv.Config{
 				CapturedFile: conf.AnonymizedFile,
@@ -93,4 +97,12 @@ func main() {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
+}
+
+func initTime(ts int64) time.Time {
+	var t time.Time
+	if ts != 0 {
+		t = time.Unix(0, ts)
+	}
+	return t
 }

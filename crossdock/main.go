@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package main
 
@@ -30,9 +19,8 @@ import (
 const (
 	behaviorEndToEnd = "endtoend"
 
-	envAgentHostPort = "JAEGER_AGENT_HOST_PORT"
-	envQueryHostPort = "JAEGER_QUERY_HOST_PORT"
-
+	envCollectorSamplingHostPort    = "JAEGER_COLLECTOR_HOST_PORT"
+	envQueryHostPort                = "JAEGER_QUERY_HOST_PORT"
 	envQueryHealthcheckHostPort     = "JAEGER_QUERY_HC_HOST_PORT"
 	envCollectorHealthcheckHostPort = "JAEGER_COLLECTOR_HC_HOST_PORT"
 )
@@ -40,9 +28,8 @@ const (
 var (
 	logger, _ = zap.NewDevelopment()
 
-	agentHostPort string
-	queryHostPort string
-
+	collectorSamplingHostPort    string
+	queryHostPort                string
 	queryHealthcheckHostPort     string
 	collectorHealthcheckHostPort string
 )
@@ -55,7 +42,7 @@ type clientHandler struct {
 }
 
 func main() {
-	agentHostPort = getEnv(envAgentHostPort, "jaeger-agent:5778")
+	collectorSamplingHostPort = getEnv(envCollectorSamplingHostPort, "jaeger-collector:14268")
 	queryHostPort = getEnv(envQueryHostPort, "jaeger-query:16686")
 	queryHealthcheckHostPort = getEnv(envQueryHealthcheckHostPort, "jaeger-query:16687")
 	collectorHealthcheckHostPort = getEnv(envCollectorHealthcheckHostPort, "jaeger-collector:14269")
@@ -65,7 +52,7 @@ func main() {
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// when method is HEAD, report back with a 200 when ready to run tests
-		if r.Method == "HEAD" {
+		if r.Method == http.MethodHead {
 			if !handler.isInitialized() {
 				http.Error(w, "Components not ready", http.StatusServiceUnavailable)
 			}
@@ -73,6 +60,7 @@ func main() {
 		}
 		handler.xHandler.ServeHTTP(w, r)
 	})
+	//nolint:gosec
 	http.ListenAndServe(":8080", nil)
 }
 
@@ -88,9 +76,9 @@ func (h *clientHandler) initialize() {
 	httpHealthCheck(logger, "jaeger-collector", "http://"+collectorHealthcheckHostPort)
 
 	queryService := services.NewQueryService("http://"+queryHostPort, logger)
-	agentService := services.NewAgentService("http://"+agentHostPort, logger)
+	collectorService := services.NewCollectorService("http://"+collectorSamplingHostPort, logger)
 
-	traceHandler := services.NewTraceHandler(queryService, agentService, logger)
+	traceHandler := services.NewTraceHandler(queryService, collectorService, logger)
 	behaviors := crossdock.Behaviors{
 		behaviorEndToEnd: traceHandler.EndToEndTest,
 	}
@@ -104,12 +92,15 @@ func (h *clientHandler) isInitialized() bool {
 }
 
 func is2xxStatusCode(statusCode int) bool {
-	return statusCode >= 200 && statusCode <= 299
+	return statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
 }
 
 func httpHealthCheck(logger *zap.Logger, service, healthURL string) {
 	for i := 0; i < 240; i++ {
 		res, err := http.Get(healthURL)
+		if err == nil {
+			res.Body.Close()
+		}
 		if err == nil && is2xxStatusCode(res.StatusCode) {
 			logger.Info("Health check successful", zap.String("service", service))
 			return

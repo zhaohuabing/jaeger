@@ -1,183 +1,198 @@
 // Copyright (c) 2022 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/confignet"
+	"go.opentelemetry.io/collector/config/configtls"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/jaegertracing/jaeger/cmd/flags"
+	"github.com/jaegertracing/jaeger/cmd/internal/flags"
 	"github.com/jaegertracing/jaeger/internal/grpctest"
-	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/dependencystore"
+	depStoreMocks "github.com/jaegertracing/jaeger/internal/storage/v1/api/dependencystore/mocks"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore"
+	spanStoreMocks "github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore/mocks"
 	"github.com/jaegertracing/jaeger/pkg/healthcheck"
+	"github.com/jaegertracing/jaeger/pkg/telemetry"
 	"github.com/jaegertracing/jaeger/pkg/tenancy"
 	"github.com/jaegertracing/jaeger/ports"
 	"github.com/jaegertracing/jaeger/proto-gen/storage_v1"
-	depStoreMocks "github.com/jaegertracing/jaeger/storage/dependencystore/mocks"
-	factoryMocks "github.com/jaegertracing/jaeger/storage/mocks"
-	spanStoreMocks "github.com/jaegertracing/jaeger/storage/spanstore/mocks"
 )
 
 var testCertKeyLocation = "../../../pkg/config/tlscfg/testdata"
 
 func TestNewServer_CreateStorageErrors(t *testing.T) {
-	factory := new(factoryMocks.Factory)
-	factory.On("CreateSpanReader").Return(nil, errors.New("no reader")).Once()
-	factory.On("CreateSpanReader").Return(nil, nil)
-	factory.On("CreateSpanWriter").Return(nil, errors.New("no writer")).Once()
-	factory.On("CreateSpanWriter").Return(nil, nil)
-	factory.On("CreateDependencyReader").Return(nil, errors.New("no deps")).Once()
-	factory.On("CreateDependencyReader").Return(nil, nil)
-
-	f := func() (*Server, error) {
+	createServer := func(factory *fakeFactory) (*Server, error) {
 		return NewServer(
-			&Options{GRPCHostPort: ":0"},
+			&Options{
+				ServerConfig: configgrpc.ServerConfig{
+					NetAddr: confignet.AddrConfig{
+						Endpoint: ":0",
+					},
+				},
+			},
 			factory,
 			tenancy.NewManager(&tenancy.Options{}),
-			zap.NewNop(),
+			telemetry.NoopSettings(),
 		)
 	}
-	_, err := f()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no reader")
 
-	_, err = f()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no writer")
+	factory := &fakeFactory{readerErr: errors.New("no reader")}
+	_, err := createServer(factory)
+	require.ErrorContains(t, err, "no reader")
 
-	_, err = f()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no deps")
+	factory = &fakeFactory{writerErr: errors.New("no writer")}
+	_, err = createServer(factory)
+	require.ErrorContains(t, err, "no writer")
 
-	s, err := f()
+	factory = &fakeFactory{depReaderErr: errors.New("no deps")}
+	_, err = createServer(factory)
+	require.ErrorContains(t, err, "no deps")
+
+	factory = &fakeFactory{}
+	s, err := createServer(factory)
 	require.NoError(t, err)
-	err = s.Start()
-	require.NoError(t, err)
-	validateGRPCServer(t, s.grpcConn.Addr().String(), s.grpcServer)
-
-	s.grpcConn.Close() // causes logged error
-	<-s.HealthCheckStatus()
+	require.NoError(t, s.Start())
+	validateGRPCServer(t, s.grpcConn.Addr().String())
+	require.NoError(t, s.grpcConn.Close())
 }
 
 func TestServerStart_BadPortErrors(t *testing.T) {
 	srv := &Server{
 		opts: &Options{
-			GRPCHostPort: ":-1",
+			ServerConfig: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint: ":-1",
+				},
+			},
 		},
 	}
-	assert.Error(t, srv.Start())
+	require.Error(t, srv.Start())
 }
 
-type storageMocks struct {
-	factory   *factoryMocks.Factory
-	reader    *spanStoreMocks.Reader
-	writer    *spanStoreMocks.Writer
-	depReader *depStoreMocks.Reader
+type fakeFactory struct {
+	reader    spanstore.Reader
+	writer    spanstore.Writer
+	depReader dependencystore.Reader
+
+	readerErr    error
+	writerErr    error
+	depReaderErr error
 }
 
-func newStorageMocks() *storageMocks {
+func (f *fakeFactory) CreateSpanReader() (spanstore.Reader, error) {
+	if f.readerErr != nil {
+		return nil, f.readerErr
+	}
+	return f.reader, nil
+}
+
+func (f *fakeFactory) CreateSpanWriter() (spanstore.Writer, error) {
+	if f.writerErr != nil {
+		return nil, f.writerErr
+	}
+	return f.writer, nil
+}
+
+func (f *fakeFactory) CreateDependencyReader() (dependencystore.Reader, error) {
+	if f.depReaderErr != nil {
+		return nil, f.depReaderErr
+	}
+	return f.depReader, nil
+}
+
+func (*fakeFactory) InitArchiveStorage(*zap.Logger) (spanstore.Reader, spanstore.Writer) {
+	return nil, nil
+}
+
+func TestNewServer_TLSConfigError(t *testing.T) {
+	tlsCfg := &configtls.ServerConfig{
+		ClientCAFile: "invalid/path",
+		Config: configtls.Config{
+			CertFile: "invalid/path",
+			KeyFile:  "invalid/path",
+		},
+	}
+	telset := telemetry.Settings{
+		Logger:       zap.NewNop(),
+		ReportStatus: telemetry.HCAdapter(healthcheck.New()),
+	}
+
+	_, err := NewServer(
+		&Options{
+			ServerConfig: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint: ":8081",
+				},
+				TLSSetting: tlsCfg,
+			},
+		},
+		&fakeFactory{},
+		tenancy.NewManager(&tenancy.Options{}),
+		telset,
+	)
+	assert.ErrorContains(t, err, "failed to load TLS config")
+}
+
+func TestCreateGRPCHandler(t *testing.T) {
 	reader := new(spanStoreMocks.Reader)
 	writer := new(spanStoreMocks.Writer)
 	depReader := new(depStoreMocks.Reader)
 
-	factory := new(factoryMocks.Factory)
-	factory.On("CreateSpanReader").Return(reader, nil)
-	factory.On("CreateSpanWriter").Return(writer, nil)
-	factory.On("CreateDependencyReader").Return(depReader, nil)
-
-	return &storageMocks{
-		factory:   factory,
+	f := &fakeFactory{
 		reader:    reader,
 		writer:    writer,
 		depReader: depReader,
 	}
-}
 
-func TestNewServer_TLSConfigError(t *testing.T) {
-	tlsCfg := tlscfg.Options{
-		Enabled:      true,
-		CertPath:     "invalid/path",
-		KeyPath:      "invalid/path",
-		ClientCAPath: "invalid/path",
-	}
-	storageMocks := newStorageMocks()
-	_, err := NewServer(
-		&Options{GRPCHostPort: ":8081", TLSGRPC: tlsCfg},
-		storageMocks.factory,
-		tenancy.NewManager(&tenancy.Options{}),
-		zap.NewNop(),
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid TLS config")
-}
-
-func TestCreateGRPCHandler(t *testing.T) {
-	storageMocks := newStorageMocks()
-	h, err := createGRPCHandler(storageMocks.factory, zap.NewNop())
+	h, err := createGRPCHandler(f)
 	require.NoError(t, err)
 
-	storageMocks.writer.On("WriteSpan", mock.Anything, mock.Anything).Return(errors.New("writer error"))
+	writer.On("WriteSpan", mock.Anything, mock.Anything).Return(errors.New("writer error"))
 	_, err = h.WriteSpan(context.Background(), &storage_v1.WriteSpanRequest{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "writer error")
+	require.ErrorContains(t, err, "writer error")
 
-	storageMocks.depReader.On("GetDependencies", mock.Anything, mock.Anything).Return(nil, errors.New("deps error"))
+	depReader.On(
+		"GetDependencies",
+		mock.Anything, // context
+		mock.Anything, // time
+		mock.Anything, // lookback
+	).Return(nil, errors.New("deps error"))
 	_, err = h.GetDependencies(context.Background(), &storage_v1.GetDependenciesRequest{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "deps error")
-
-	err = h.GetArchiveTrace(nil, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not implemented")
-
-	_, err = h.WriteArchiveSpan(context.Background(), nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not implemented")
+	require.ErrorContains(t, err, "deps error")
 
 	err = h.WriteSpanStream(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not implemented")
+	assert.ErrorContains(t, err, "not implemented")
 }
 
 var testCases = []struct {
 	name              string
-	TLS               tlscfg.Options
-	clientTLS         tlscfg.Options
+	TLS               *configtls.ServerConfig
+	clientTLS         *configtls.ClientConfig
 	expectError       bool
 	expectClientError bool
 	expectServerFail  bool
 }{
 	{
 		name: "should pass with insecure connection",
-		TLS: tlscfg.Options{
-			Enabled: false,
-		},
-		clientTLS: tlscfg.Options{
-			Enabled: false,
+		TLS:  nil,
+		clientTLS: &configtls.ClientConfig{
+			Insecure: true,
 		},
 		expectError:       false,
 		expectClientError: false,
@@ -185,13 +200,13 @@ var testCases = []struct {
 	},
 	{
 		name: "should fail with TLS client to untrusted TLS server",
-		TLS: tlscfg.Options{
-			Enabled:  true,
-			CertPath: testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:  testCertKeyLocation + "/example-server-key.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
+		clientTLS: &configtls.ClientConfig{
 			ServerName: "example.com",
 		},
 		expectError:       true,
@@ -200,14 +215,16 @@ var testCases = []struct {
 	},
 	{
 		name: "should fail with TLS client to trusted TLS server with incorrect hostname",
-		TLS: tlscfg.Options{
-			Enabled:  true,
-			CertPath: testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:  testCertKeyLocation + "/example-server-key.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: &configtls.ClientConfig{
+			Config: configtls.Config{
+				CAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			},
 			ServerName: "nonEmpty",
 		},
 		expectError:       true,
@@ -216,14 +233,16 @@ var testCases = []struct {
 	},
 	{
 		name: "should pass with TLS client to trusted TLS server with correct hostname",
-		TLS: tlscfg.Options{
-			Enabled:  true,
-			CertPath: testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:  testCertKeyLocation + "/example-server-key.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: &configtls.ClientConfig{
+			Config: configtls.Config{
+				CAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			},
 			ServerName: "example.com",
 		},
 		expectError:       false,
@@ -232,15 +251,17 @@ var testCases = []struct {
 	},
 	{
 		name: "should fail with TLS client without cert to trusted TLS server requiring cert",
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
+			ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: &configtls.ClientConfig{
+			Config: configtls.Config{
+				CAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			},
 			ServerName: "example.com",
 		},
 		expectError:       false,
@@ -249,18 +270,20 @@ var testCases = []struct {
 	},
 	{
 		name: "should pass with TLS client with cert to trusted TLS server requiring cert",
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
+			ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: &configtls.ClientConfig{
+			Config: configtls.Config{
+				CAFile:   testCertKeyLocation + "/example-CA-cert.pem",
+				CertFile: testCertKeyLocation + "/example-client-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-client-key.pem",
+			},
 			ServerName: "example.com",
-			CertPath:   testCertKeyLocation + "/example-client-cert.pem",
-			KeyPath:    testCertKeyLocation + "/example-client-key.pem",
 		},
 		expectError:       false,
 		expectServerFail:  false,
@@ -268,18 +291,20 @@ var testCases = []struct {
 	},
 	{
 		name: "should fail with TLS client without cert to trusted TLS server requiring cert from a different CA",
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/wrong-CA-cert.pem", // NB: wrong CA
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
+			ClientCAFile: testCertKeyLocation + "/wrong-CA-cert.pem",
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: &configtls.ClientConfig{
+			Config: configtls.Config{
+				CAFile:   testCertKeyLocation + "/example-CA-cert.pem",
+				CertFile: testCertKeyLocation + "/example-client-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-client-key.pem",
+			},
 			ServerName: "example.com",
-			CertPath:   testCertKeyLocation + "/example-client-cert.pem",
-			KeyPath:    testCertKeyLocation + "/example-client-key.pem",
 		},
 		expectError:       false,
 		expectServerFail:  false,
@@ -294,9 +319,6 @@ type grpcClient struct {
 }
 
 func newGRPCClient(t *testing.T, addr string, creds credentials.TransportCredentials, tm *tenancy.Manager) *grpcClient {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
 	dialOpts := []grpc.DialOption{
 		grpc.WithUnaryInterceptor(tenancy.NewClientUnaryInterceptor(tm)),
 	}
@@ -305,8 +327,7 @@ func newGRPCClient(t *testing.T, addr string, creds credentials.TransportCredent
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
-
-	conn, err := grpc.DialContext(ctx, addr, dialOpts...)
+	conn, err := grpc.NewClient(addr, dialOpts...)
 	require.NoError(t, err)
 
 	return &grpcClient{
@@ -319,44 +340,42 @@ func TestServerGRPCTLS(t *testing.T) {
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
 			serverOptions := &Options{
-				GRPCHostPort: ":0",
-				TLSGRPC:      test.TLS,
+				ServerConfig: configgrpc.ServerConfig{
+					NetAddr: confignet.AddrConfig{
+						Endpoint: ":0",
+					},
+					TLSSetting: test.TLS,
+				},
 			}
 			flagsSvc := flags.NewService(ports.QueryAdminHTTP)
 			flagsSvc.Logger = zap.NewNop()
 
-			storageMocks := newStorageMocks()
+			reader := new(spanStoreMocks.Reader)
+			f := &fakeFactory{
+				reader: reader,
+			}
 			expectedServices := []string{"test"}
-			storageMocks.reader.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(expectedServices, nil)
+			reader.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(expectedServices, nil)
 
 			tm := tenancy.NewManager(&tenancy.Options{Enabled: true})
+			telset := telemetry.Settings{
+				Logger:       flagsSvc.Logger,
+				ReportStatus: telemetry.HCAdapter(flagsSvc.HC()),
+			}
 			server, err := NewServer(
 				serverOptions,
-				storageMocks.factory,
+				f,
 				tm,
-				flagsSvc.Logger,
+				telset,
 			)
-			assert.Nil(t, err)
-			assert.NoError(t, server.Start())
-
-			var wg sync.WaitGroup
-			wg.Add(1)
-			once := sync.Once{}
-
-			go func() {
-				for s := range server.HealthCheckStatus() {
-					flagsSvc.HC().Set(s)
-					if s == healthcheck.Unavailable {
-						once.Do(wg.Done)
-					}
-				}
-			}()
+			require.NoError(t, err)
+			require.NoError(t, server.Start())
 
 			var clientError error
 			var client *grpcClient
 
-			if serverOptions.TLSGRPC.Enabled {
-				clientTLSCfg, err0 := test.clientTLS.Config(zap.NewNop())
+			if serverOptions.TLSSetting != nil {
+				clientTLSCfg, err0 := test.clientTLS.LoadTLSConfig(context.Background())
 				require.NoError(t, err0)
 				creds := credentials.NewTLS(clientTLSCfg)
 				client = newGRPCClient(t, server.grpcConn.Addr().String(), creds, tm)
@@ -376,9 +395,8 @@ func TestServerGRPCTLS(t *testing.T) {
 				require.NoError(t, clientError)
 				assert.Equal(t, expectedServices, res.Services)
 			}
-			require.Nil(t, client.conn.Close())
+			require.NoError(t, client.conn.Close())
 			server.Close()
-			wg.Wait()
 			assert.Equal(t, healthcheck.Unavailable, flagsSvc.HC().Get())
 		})
 	}
@@ -388,17 +406,21 @@ func TestServerHandlesPortZero(t *testing.T) {
 	flagsSvc := flags.NewService(ports.QueryAdminHTTP)
 	zapCore, logs := observer.New(zap.InfoLevel)
 	flagsSvc.Logger = zap.New(zapCore)
-	storageMocks := newStorageMocks()
-
+	telset := telemetry.Settings{
+		Logger:       flagsSvc.Logger,
+		ReportStatus: telemetry.HCAdapter(flagsSvc.HC()),
+	}
 	server, err := NewServer(
-		&Options{GRPCHostPort: ":0"},
-		storageMocks.factory,
+		&Options{ServerConfig: configgrpc.ServerConfig{
+			NetAddr: confignet.AddrConfig{Endpoint: ":0"},
+		}},
+		&fakeFactory{},
 		tenancy.NewManager(&tenancy.Options{}),
-		flagsSvc.Logger,
+		telset,
 	)
-	require.Nil(t, err)
+	require.NoError(t, err)
+
 	require.NoError(t, server.Start())
-	defer server.Close()
 
 	const line = "Starting GRPC server"
 	message := logs.FilterMessage(line)
@@ -406,22 +428,23 @@ func TestServerHandlesPortZero(t *testing.T) {
 
 	onlyEntry := message.All()[0]
 	hostPort := onlyEntry.ContextMap()["addr"].(string)
-	validateGRPCServer(t, hostPort, server.grpcServer)
+	validateGRPCServer(t, hostPort)
+
+	server.Close()
+
+	assert.Equal(t, healthcheck.Unavailable, flagsSvc.HC().Get())
 }
 
-func validateGRPCServer(t *testing.T, hostPort string, server *grpc.Server) {
+func validateGRPCServer(t *testing.T, hostPort string) {
 	grpctest.ReflectionServiceValidator{
 		HostPort: hostPort,
-		Server:   server,
 		ExpectedServices: []string{
 			"jaeger.storage.v1.SpanReaderPlugin",
 			"jaeger.storage.v1.SpanWriterPlugin",
 			"jaeger.storage.v1.DependenciesReaderPlugin",
 			"jaeger.storage.v1.PluginCapabilities",
-			"jaeger.storage.v1.ArchiveSpanReaderPlugin",
-			"jaeger.storage.v1.ArchiveSpanWriterPlugin",
 			"jaeger.storage.v1.StreamingSpanWriterPlugin",
-			// "grpc.health.v1.Health",
+			"grpc.health.v1.Health",
 		},
 	}.Execute(t)
 }

@@ -1,3 +1,8 @@
+go.work
+go.work.sum
+
+.tools/
+
 *.out
 *.test
 *.xml
@@ -12,9 +17,10 @@ cover.html
 .tmp/
 .mkdocs-virtual-env/
 vendor/
+
+# Jaeger binaries
 examples/hotrod/hotrod
 examples/hotrod/hotrod-*
-examples/memstore-plugin/memstore-plugin
 cmd/all-in-one/all-in-one-*
 cmd/agent/agent
 cmd/agent/agent-*
@@ -24,6 +30,7 @@ cmd/collector/collector
 cmd/collector/collector-*
 cmd/ingester/ingester
 cmd/ingester/ingester-*
+cmd/jaeger/internal/integration/results
 cmd/remote-storage/remote-storage
 cmd/remote-storage/remote-storage-*
 cmd/es-index-cleaner/es-index-cleaner-*
@@ -32,11 +39,15 @@ cmd/query/query
 cmd/query/query-*
 cmd/tracegen/tracegen
 cmd/tracegen/tracegen-*
-cmd/docs/*.md
-cmd/docs/*.rst
-cmd/docs/*.1
-cmd/docs/*.yaml
 crossdock/crossdock-*
+
 run-crossdock.log
-proto-gen/.patched-otel-proto/
 __pycache__
+.asset-manifest.json
+deploy/
+deploy-staging/
+sha256sum.combined.txt
+resource.syso
+.gocache
+test-results.json
+.metrics/

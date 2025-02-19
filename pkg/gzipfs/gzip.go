@@ -1,17 +1,6 @@
 // Copyright (c) 2021 The Jaeger Authors.
 // Copyright 2021 The Prometheus Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package gzipfs
 
@@ -50,17 +39,17 @@ func (f file) Stat() (fs.FileInfo, error) {
 	}, nil
 }
 
-func (f *file) Read(buf []byte) (n int, err error) {
+func (f *file) Read(buf []byte) (int, error) {
 	if len(buf) > len(f.content)-f.offset {
 		buf = buf[0:len(f.content[f.offset:])]
 	}
 
-	n = copy(buf, f.content[f.offset:])
+	n := copy(buf, f.content[f.offset:])
 	if n == len(f.content)-f.offset {
 		return n, io.EOF
 	}
 	f.offset += n
-	return
+	return n, nil
 }
 
 func (f file) Close() error {
@@ -80,12 +69,12 @@ func (fi fileInfo) ModTime() time.Time { return fi.info.ModTime() }
 
 func (fi fileInfo) IsDir() bool { return fi.info.IsDir() }
 
-func (fi fileInfo) Sys() interface{} { return nil }
+func (fileInfo) Sys() any { return nil }
 
 // New wraps underlying fs that is expected to contain gzipped files
 // and presents an unzipped view of it.
-func New(fs fs.FS) fs.FS {
-	return fileSystem{fs}
+func New(fileSys fs.FS) fs.FS {
+	return fileSystem{fileSys}
 }
 
 func (cfs fileSystem) Open(path string) (fs.File, error) {

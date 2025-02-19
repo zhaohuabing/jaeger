@@ -1,16 +1,5 @@
 // Copyright (c) 2019 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package grpcresolver
 
@@ -23,18 +12,20 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/resolver"
-	grpctest "google.golang.org/grpc/test/grpc_testing"
 
 	"github.com/jaegertracing/jaeger/pkg/discovery"
+	"github.com/jaegertracing/jaeger/pkg/testutils"
 )
 
 type testServer struct {
-	grpctest.TestServiceServer
+	grpc_testing.TestServiceServer
 }
 
 type test struct {
@@ -42,8 +33,8 @@ type test struct {
 	addresses []string
 }
 
-func (s *testServer) EmptyCall(ctx context.Context, in *grpctest.Empty) (*grpctest.Empty, error) {
-	return &grpctest.Empty{}, nil
+func (*testServer) EmptyCall(context.Context, *grpc_testing.Empty /* in */) (*grpc_testing.Empty, error) {
+	return &grpc_testing.Empty{}, nil
 }
 
 func (t *test) cleanup() {
@@ -65,9 +56,9 @@ func startTestServers(t *testing.T, count int) *test {
 	testInstance := &test{}
 	for i := 0; i < count; i++ {
 		lis, err := net.Listen("tcp", "localhost:0")
-		assert.NoError(t, err, "failed to listen on tcp")
+		require.NoError(t, err, "failed to listen on tcp")
 		s := grpc.NewServer()
-		grpctest.RegisterTestServiceServer(s, &testServer{})
+		grpc_testing.RegisterTestServiceServer(s, &testServer{})
 		testInstance.servers = append(testInstance.servers, s)
 		testInstance.addresses = append(testInstance.addresses, lis.Addr().String())
 
@@ -79,14 +70,17 @@ func startTestServers(t *testing.T, count int) *test {
 	return testInstance
 }
 
-func makeSureConnectionsUp(t *testing.T, count int, testc grpctest.TestServiceClient) {
+func makeSureConnectionsUp(t *testing.T, count int, testc grpc_testing.TestServiceClient) {
 	var p peer.Peer
 	addrs := make(map[string]struct{})
 	// Make sure connections to all servers are up.
 	for si := 0; si < count; si++ {
 		connected := false
 		for i := 0; i < 3000; i++ { // 3000 * 10ms = 30s
-			_, err := testc.EmptyCall(context.Background(), &grpctest.Empty{}, grpc.Peer(&p))
+			if i != 0 {
+				time.Sleep(time.Millisecond * 10)
+			}
+			_, err := testc.EmptyCall(context.Background(), &grpc_testing.Empty{}, grpc.Peer(&p))
 			if err != nil {
 				continue
 			}
@@ -96,18 +90,17 @@ func makeSureConnectionsUp(t *testing.T, count int, testc grpctest.TestServiceCl
 				t.Logf("connected to peer #%d (%v) on iteration %d", si, p.Addr, i)
 				break
 			}
-			time.Sleep(time.Millisecond * 10)
 		}
 		assert.True(t, connected, "Connection #%d was still not up. Connections so far: %+v", si, addrs)
 	}
 }
 
-func assertRoundRobinCall(t *testing.T, connections int, testc grpctest.TestServiceClient) {
+func assertRoundRobinCall(t *testing.T, connections int, testc grpc_testing.TestServiceClient) {
 	addrs := make(map[string]struct{})
 	var p peer.Peer
 	for i := 0; i < connections; i++ {
-		_, err := testc.EmptyCall(context.Background(), &grpctest.Empty{}, grpc.Peer(&p))
-		assert.NoError(t, err)
+		_, err := testc.EmptyCall(context.Background(), &grpc_testing.Empty{}, grpc.Peer(&p))
+		require.NoError(t, err)
 		addrs[p.Addr.String()] = struct{}{}
 	}
 	assert.Len(t, addrs, connections, "must call each of the servers once")
@@ -145,13 +138,12 @@ func TestGRPCResolverRoundRobin(t *testing.T) {
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%+v", test), func(t *testing.T) {
 			res := New(notifier, discoverer, zap.NewNop(), test.minPeers)
-			defer resolver.UnregisterForTesting(res.Scheme())
 
-			cc, err := grpc.Dial(res.Scheme()+":///round_robin", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultServiceConfig(GRPCServiceConfig))
-			assert.NoError(t, err, "could not dial using resolver's scheme")
+			cc, err := grpc.NewClient(res.Scheme()+":///round_robin", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultServiceConfig(GRPCServiceConfig))
+			require.NoError(t, err, "could not dial using resolver's scheme")
 			defer cc.Close()
 
-			testc := grpctest.NewTestServiceClient(cc)
+			testc := grpc_testing.NewTestServiceClient(cc)
 
 			notifier.Notify(testInstances.addresses)
 
@@ -174,4 +166,8 @@ func TestRendezvousHash(t *testing.T) {
 	subset1 := resolverInstance.rendezvousHash(addresses)
 	subset2 := resolverInstance.rendezvousHash(sameAddressesDifferentOrder)
 	assert.Equal(t, subset1, subset2)
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

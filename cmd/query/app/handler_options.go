@@ -1,24 +1,13 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
 	"time"
 
-	"github.com/opentracing/opentracing-go"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger/cmd/query/app/querysvc"
@@ -61,8 +50,8 @@ func (handlerOptions) QueryLookbackDuration(queryLookbackDuration time.Duration)
 	}
 }
 
-// Tracer creates a HandlerOption that initializes OpenTracing tracer
-func (handlerOptions) Tracer(tracer opentracing.Tracer) HandlerOption {
+// Tracer creates a HandlerOption that passes the tracer to the handler
+func (handlerOptions) Tracer(tracer trace.TracerProvider) HandlerOption {
 	return func(apiHandler *APIHandler) {
 		apiHandler.tracer = tracer
 	}

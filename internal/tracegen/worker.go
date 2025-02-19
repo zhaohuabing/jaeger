@@ -1,105 +1,115 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package tracegen
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/ext"
-	"github.com/uber/jaeger-client-go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
 type worker struct {
-	running  *uint32         // pointer to shared flag that indicates it's time to stop the test
-	id       int             // worker id
-	traces   int             // how many traces the worker has to generate (only when duration==0)
-	marshal  bool            // whether the worker needs to marshal trace context via HTTP headers
-	debug    bool            // whether to set DEBUG flag on the spans
-	firehose bool            // whether to set FIREHOSE flag on the spans
-	duration time.Duration   // how long to run the test for (overrides `traces`)
-	pause    time.Duration   // how long to pause before finishing the trace
-	wg       *sync.WaitGroup // notify when done
-	logger   *zap.Logger
+	tracers []trace.Tracer
+	running *uint32 // pointer to shared flag that indicates it's time to stop the test
+	id      int     // worker id
+	Config
+	wg     *sync.WaitGroup // notify when done
+	logger *zap.Logger
+
+	// internal counters
+	traceNo   int
+	attrKeyNo int
+	attrValNo int
 }
 
 const (
-	fakeIP uint32 = 1<<24 | 2<<16 | 3<<8 | 4
-
 	fakeSpanDuration = 123 * time.Microsecond
 )
 
-func (w worker) simulateTraces() {
-	tracer := opentracing.GlobalTracer()
-	var i int
+func (w *worker) simulateTraces() {
 	for atomic.LoadUint32(w.running) == 1 {
-		sp := tracer.StartSpan("lets-go")
-		ext.SpanKindRPCClient.Set(sp)
-		ext.PeerHostIPv4.Set(sp, fakeIP)
-		ext.PeerService.Set(sp, "tracegen-server")
-		if w.debug {
-			ext.SamplingPriority.Set(sp, 100)
-		}
-
-		if w.firehose {
-			jaeger.EnableFirehose(sp.(*jaeger.Span))
-		}
-
-		childCtx := sp.Context()
-		if w.marshal {
-			m := make(map[string]string)
-			c := opentracing.TextMapCarrier(m)
-			if err := tracer.Inject(sp.Context(), opentracing.TextMap, c); err == nil {
-				c := opentracing.TextMapCarrier(m)
-				childCtx, err = tracer.Extract(opentracing.TextMap, c)
-				if err != nil {
-					w.logger.Error("cannot extract from TextMap", zap.Error(err))
-				}
-			} else {
-				w.logger.Error("cannot inject span", zap.Error(err))
-			}
-		}
-		child := opentracing.StartSpan(
-			"okey-dokey",
-			ext.RPCServerOption(childCtx),
-		)
-		ext.PeerHostIPv4.Set(child, fakeIP)
-		ext.PeerService.Set(child, "tracegen-client")
-
-		time.Sleep(w.pause)
-
-		if w.pause == 0 {
-			child.Finish()
-			sp.Finish()
-		} else {
-			opt := opentracing.FinishOptions{FinishTime: time.Now().Add(fakeSpanDuration)}
-			child.FinishWithOptions(opt)
-			sp.FinishWithOptions(opt)
-		}
-
-		i++
-		if w.traces != 0 {
-			if i >= w.traces {
+		svcNo := w.traceNo % len(w.tracers)
+		w.simulateOneTrace(w.tracers[svcNo])
+		w.traceNo++
+		if w.Traces != 0 {
+			if w.traceNo >= w.Traces {
 				break
 			}
 		}
 	}
-	w.logger.Info(fmt.Sprintf("Worker %d generated %d traces", w.id, i))
+	w.logger.Info(fmt.Sprintf("Worker %d generated %d traces", w.id, w.traceNo))
 	w.wg.Done()
+}
+
+func (w *worker) simulateOneTrace(tracer trace.Tracer) {
+	ctx := context.Background()
+	attrs := []attribute.KeyValue{
+		attribute.String("peer.service", "tracegen-server"),
+		attribute.String("peer.host.ipv4", "1.1.1.1"),
+	}
+	if w.Debug {
+		attrs = append(attrs, attribute.Bool("jaeger.debug", true))
+	}
+	if w.Firehose {
+		attrs = append(attrs, attribute.Bool("jaeger.firehose", true))
+	}
+	start := time.Now()
+	ctx, parent := tracer.Start(
+		ctx,
+		"lets-go",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attrs...),
+		trace.WithTimestamp(start),
+	)
+	w.simulateChildSpans(ctx, start, tracer)
+
+	if w.Pause != 0 {
+		parent.End()
+	} else {
+		totalDuration := time.Duration(w.ChildSpans) * fakeSpanDuration
+		parent.End(
+			trace.WithTimestamp(start.Add(totalDuration)),
+		)
+	}
+}
+
+func (w *worker) simulateChildSpans(ctx context.Context, start time.Time, tracer trace.Tracer) {
+	for c := 0; c < w.ChildSpans; c++ {
+		var attrs []attribute.KeyValue
+		for a := 0; a < w.Attributes; a++ {
+			key := fmt.Sprintf("attr_%02d", w.attrKeyNo)
+			val := fmt.Sprintf("val_%02d", w.attrValNo)
+			attrs = append(attrs, attribute.String(key, val))
+			w.attrKeyNo = (w.attrKeyNo + 1) % w.AttrKeys
+			w.attrValNo = (w.attrValNo + 1) % w.AttrValues
+		}
+		opts := []trace.SpanStartOption{
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(attrs...),
+		}
+		childStart := start.Add(time.Duration(c) * fakeSpanDuration)
+		if w.Pause == 0 {
+			opts = append(opts, trace.WithTimestamp(childStart))
+		}
+		_, child := tracer.Start(
+			ctx,
+			fmt.Sprintf("child-span-%02d", c),
+			opts...,
+		)
+		if w.Pause != 0 {
+			time.Sleep(w.Pause)
+			child.End()
+		} else {
+			child.End(
+				trace.WithTimestamp(childStart.Add(fakeSpanDuration)),
+			)
+		}
+	}
 }

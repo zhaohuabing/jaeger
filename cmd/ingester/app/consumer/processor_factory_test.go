@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package consumer
 
@@ -20,17 +9,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	kmocks "github.com/jaegertracing/jaeger/cmd/ingester/app/consumer/mocks"
+	cmocks "github.com/jaegertracing/jaeger/cmd/ingester/app/consumer/mocks"
 	"github.com/jaegertracing/jaeger/cmd/ingester/app/processor/mocks"
+	kmocks "github.com/jaegertracing/jaeger/pkg/kafka/consumer/mocks"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
 )
 
 func Test_NewFactory(t *testing.T) {
 	params := ProcessorFactoryParams{}
 	newFactory, err := NewProcessorFactory(params)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.NotNil(t, newFactory)
 }
 
@@ -46,7 +37,6 @@ func Test_new(t *testing.T) {
 	sp.On("Process", mock.Anything).Return(nil)
 
 	pf := ProcessorFactory{
-		topic:          topic,
 		consumer:       mockConsumer,
 		metricsFactory: metrics.NullFactory,
 		logger:         zap.NewNop(),
@@ -54,8 +44,9 @@ func Test_new(t *testing.T) {
 		parallelism:    1,
 	}
 
-	processor := pf.new(partition, offset)
-	msg := &kmocks.Message{}
+	processor := pf.new(topic, partition, offset)
+	defer processor.Close()
+	msg := &cmocks.Message{}
 	msg.On("Offset").Return(offset + 1)
 	processor.Process(msg)
 
@@ -90,7 +81,7 @@ func (f *fakeProcessor) Start() {
 
 type fakeMsg struct{}
 
-func (f *fakeMsg) Value() []byte {
+func (*fakeMsg) Value() []byte {
 	return nil
 }
 

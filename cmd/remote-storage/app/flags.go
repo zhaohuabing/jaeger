@@ -1,16 +1,5 @@
 // Copyright (c) 2022 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -19,7 +8,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/viper"
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/config/configgrpc"
 
 	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
 	"github.com/jaegertracing/jaeger/pkg/tenancy"
@@ -36,10 +25,7 @@ var tlsGRPCFlagsConfig = tlscfg.ServerFlagsConfig{
 
 // Options holds configuration for remote-storage service.
 type Options struct {
-	// GRPCHostPort is the host:port address for gRPC server
-	GRPCHostPort string
-	// TLSGRPC configures secure transport
-	TLSGRPC tlscfg.Options
+	configgrpc.ServerConfig
 	// Tenancy configuration
 	Tenancy tenancy.Options
 }
@@ -52,13 +38,13 @@ func AddFlags(flagSet *flag.FlagSet) {
 }
 
 // InitFromViper initializes Options with properties from CLI flags.
-func (o *Options) InitFromViper(v *viper.Viper, logger *zap.Logger) (*Options, error) {
-	o.GRPCHostPort = v.GetString(flagGRPCHostPort)
-	if tlsGrpc, err := tlsGRPCFlagsConfig.InitFromViper(v); err == nil {
-		o.TLSGRPC = tlsGrpc
-	} else {
+func (o *Options) InitFromViper(v *viper.Viper) (*Options, error) {
+	o.NetAddr.Endpoint = v.GetString(flagGRPCHostPort)
+	tlsGRPC, err := tlsGRPCFlagsConfig.InitFromViper(v)
+	if err != nil {
 		return o, fmt.Errorf("failed to process gRPC TLS options: %w", err)
 	}
+	o.TLSSetting = tlsGRPC
 	o.Tenancy = tenancy.InitFromViper(v)
 	return o, nil
 }

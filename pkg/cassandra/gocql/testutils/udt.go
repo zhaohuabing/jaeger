@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package testutils
 
@@ -21,6 +10,7 @@ import (
 
 	"github.com/gocql/gocql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // UDTField describes a field in a gocql User Defined Type
@@ -57,17 +47,17 @@ func (testCase UDTTestCase) Run(t *testing.T) {
 			typeInfo := *(*gocql.NativeType)(unsafe.Pointer(&nt)) /* nolint #nosec */
 			data, err := testCase.Obj.MarshalUDT(field.Name, typeInfo)
 			if field.Err {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				assert.Equal(t, field.ValIn, data)
 			}
 			obj := testCase.New()
 			err = obj.UnmarshalUDT(field.Name, typeInfo, field.ValIn)
 			if field.Err {
-				assert.Error(t, err)
+				require.Error(t, err)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}
 		})
 	}

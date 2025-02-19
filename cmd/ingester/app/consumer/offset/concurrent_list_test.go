@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package offset
 
@@ -30,8 +19,8 @@ func insert(list *ConcurrentList, offsets ...int64) {
 
 func TestInsert(t *testing.T) {
 	for _, testCase := range generatePermutations([]int64{1, 2, 3}) {
-		min, toInsert := extractMin(testCase)
-		s := newConcurrentList(min)
+		m, toInsert := extractMin(testCase)
+		s := newConcurrentList(m)
 		insert(s, toInsert...)
 		assert.ElementsMatch(t, testCase, s.offsets)
 	}
@@ -73,8 +62,8 @@ func TestGetHighestAndReset(t *testing.T) {
 	for _, testCase := range testCases {
 		for _, input := range generatePermutations(testCase.input) {
 			t.Run(fmt.Sprintf("%v", input), func(t *testing.T) {
-				min, input := extractMin(input)
-				s := newConcurrentList(min)
+				m, input := extractMin(input)
+				s := newConcurrentList(m)
 				insert(s, input...)
 				actualOffset := s.setToHighestContiguous()
 				assert.ElementsMatch(t, testCase.expectedList, s.offsets)
@@ -92,12 +81,12 @@ func TestMultipleInsertsAndResets(t *testing.T) {
 	}
 	l.insert(50)
 
-	assert.Equal(t, 101, len(l.offsets))
+	assert.Len(t, l.offsets, 101)
 	assert.Equal(t, int64(50), l.offsets[100])
 
 	r := l.setToHighestContiguous()
 	assert.Equal(t, int64(50), r)
-	assert.Equal(t, 101, len(l.offsets))
+	assert.Len(t, l.offsets, 101)
 
 	for i := 51; i < 99; i++ {
 		l.insert(int64(i))
@@ -105,7 +94,7 @@ func TestMultipleInsertsAndResets(t *testing.T) {
 
 	r = l.setToHighestContiguous()
 	assert.Equal(t, int64(98), r)
-	assert.Equal(t, 101, len(l.offsets))
+	assert.Len(t, l.offsets, 101)
 }
 
 // Heaps algorithm as per https://stackoverflow.com/questions/30226438/generate-all-permutations-in-go
@@ -122,13 +111,9 @@ func generatePermutations(arr []int64) [][]int64 {
 			for i := 0; i < n; i++ {
 				helper(arr, n-1)
 				if n%2 == 1 {
-					tmp := arr[i]
-					arr[i] = arr[n-1]
-					arr[n-1] = tmp
+					arr[i], arr[n-1] = arr[n-1], arr[i]
 				} else {
-					tmp := arr[0]
-					arr[0] = arr[n-1]
-					arr[n-1] = tmp
+					arr[0], arr[n-1] = arr[n-1], arr[0]
 				}
 			}
 		}

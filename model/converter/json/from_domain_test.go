@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package json
 
@@ -27,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	jModel "github.com/jaegertracing/jaeger/model/json"
 )
 
@@ -64,7 +53,7 @@ func TestMarshalJSON(t *testing.T) {
 	require.NoError(t, jsonpb.Unmarshal(bb, &trace2))
 	trace1.NormalizeTimestamps()
 	trace2.NormalizeTimestamps()
-	assert.Equal(t, trace1, &trace2)
+	assert.Equal(t, &trace2, trace1)
 }
 
 func TestFromDomain(t *testing.T) {
@@ -96,23 +85,24 @@ func TestFromDomainEmbedProcess(t *testing.T) {
 	}
 }
 
-func loadFixturesUI(t *testing.T, i int) ([]byte, []byte) {
+func loadFixturesUI(t *testing.T, i int) (inStr []byte, outStr []byte) {
 	return loadFixtures(t, i, false)
 }
 
-func loadFixturesES(t *testing.T, i int) ([]byte, []byte) {
+func loadFixturesES(t *testing.T, i int) (inStr []byte, outStr []byte) {
 	return loadFixtures(t, i, true)
 }
 
 // Loads and returns domain model and JSON model fixtures with given number i.
-func loadFixtures(t *testing.T, i int, processEmbedded bool) ([]byte, []byte) {
+func loadFixtures(t *testing.T, i int, processEmbedded bool) (inStr []byte, outStr []byte) {
 	var in string
+	var err error
 	if processEmbedded {
 		in = fmt.Sprintf("fixtures/domain_es_%02d.json", i)
 	} else {
 		in = fmt.Sprintf("fixtures/domain_%02d.json", i)
 	}
-	inStr, err := os.ReadFile(in)
+	inStr, err = os.ReadFile(in)
 	require.NoError(t, err)
 	var out string
 	if processEmbedded {
@@ -120,12 +110,12 @@ func loadFixtures(t *testing.T, i int, processEmbedded bool) ([]byte, []byte) {
 	} else {
 		out = fmt.Sprintf("fixtures/ui_%02d.json", i)
 	}
-	outStr, err := os.ReadFile(out)
+	outStr, err = os.ReadFile(out)
 	require.NoError(t, err)
 	return inStr, outStr
 }
 
-func testJSONEncoding(t *testing.T, i int, expectedStr []byte, object interface{}, processEmbedded bool) {
+func testJSONEncoding(t *testing.T, i int, expectedStr []byte, object any, processEmbedded bool) {
 	buf := &bytes.Buffer{}
 	enc := json.NewEncoder(buf)
 	enc.SetIndent("", "  ")
@@ -140,7 +130,7 @@ func testJSONEncoding(t *testing.T, i int, expectedStr []byte, object interface{
 
 	if !assert.Equal(t, string(expectedStr), buf.String()) {
 		err := os.WriteFile(outFile+"-actual.json", buf.Bytes(), 0o644)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}
 }
 

@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package processors
 
@@ -24,10 +13,13 @@ import (
 	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/agent"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/jaeger"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/zipkincore"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/reporter"
 	grpcrep "github.com/jaegertracing/jaeger/cmd/agent/app/reporter/grpc"
 	"github.com/jaegertracing/jaeger/cmd/agent/app/servers"
@@ -35,9 +27,6 @@ import (
 	"github.com/jaegertracing/jaeger/cmd/agent/app/testutils"
 	"github.com/jaegertracing/jaeger/internal/metricstest"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
-	"github.com/jaegertracing/jaeger/thrift-gen/agent"
-	"github.com/jaegertracing/jaeger/thrift-gen/jaeger"
-	"github.com/jaegertracing/jaeger/thrift-gen/zipkincore"
 )
 
 // TODO make these tests faster, they take almost 4 seconds
@@ -64,7 +53,7 @@ func createProcessor(t *testing.T, mFactory metrics.Factory, tFactory thrift.TPr
 	require.NoError(t, err)
 
 	numProcessors := 1
-	processor, err := NewThriftProcessor(server, numProcessors, mFactory, tFactory, handler, zap.NewNop())
+	processor, err := NewThriftProcessor(server, numProcessors, mFactory, tFactory, handler, zaptest.NewLogger(t))
 	require.NoError(t, err)
 
 	go processor.Serve()
@@ -79,27 +68,28 @@ func createProcessor(t *testing.T, mFactory metrics.Factory, tFactory thrift.TPr
 	return transport.Addr().String(), processor
 }
 
+// revive:disable-next-line function-result-limit
 func initCollectorAndReporter(t *testing.T) (*metricstest.Factory, *testutils.GrpcCollector, reporter.Reporter, *grpc.ClientConn) {
 	grpcCollector := testutils.StartGRPCCollector(t)
-	conn, err := grpc.Dial(grpcCollector.Listener().Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(grpcCollector.Listener().Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
-	rep := grpcrep.NewReporter(conn, map[string]string{}, zap.NewNop())
+	rep := grpcrep.NewReporter(conn, map[string]string{}, zaptest.NewLogger(t))
 	metricsFactory := metricstest.NewFactory(0)
-	reporter := reporter.WrapWithMetrics(rep, metricsFactory)
-	return metricsFactory, grpcCollector, reporter, conn
+	metricsReporter := reporter.WrapWithMetrics(rep, metricsFactory)
+	return metricsFactory, grpcCollector, metricsReporter, conn
 }
 
 func TestNewThriftProcessor_ZeroCount(t *testing.T) {
-	_, err := NewThriftProcessor(nil, 0, nil, nil, nil, zap.NewNop())
-	assert.EqualError(t, err, "number of processors must be greater than 0, called with 0")
+	_, err := NewThriftProcessor(nil, 0, nil, nil, nil, zaptest.NewLogger(t))
+	require.EqualError(t, err, "number of processors must be greater than 0, called with 0")
 }
 
 func TestProcessorWithCompactZipkin(t *testing.T) {
-	metricsFactory, collector, reporter, conn := initCollectorAndReporter(t)
+	metricsFactory, collector, metricsReporter, conn := initCollectorAndReporter(t)
 	defer conn.Close()
 	defer collector.Close()
 
-	hostPort, processor := createProcessor(t, metricsFactory, compactFactory, agent.NewAgentProcessor(reporter))
+	hostPort, processor := createProcessor(t, metricsFactory, compactFactory, agent.NewAgentProcessor(metricsReporter))
 	defer processor.Stop()
 
 	client, clientCloser, err := testutils.NewZipkinThriftUDPClient(hostPort)
@@ -120,7 +110,7 @@ type failingHandler struct {
 	err error
 }
 
-func (h failingHandler) Process(_ context.Context, iprot, oprot thrift.TProtocol) (success bool, err thrift.TException) {
+func (h failingHandler) Process(context.Context, thrift.TProtocol /* iprot */, thrift.TProtocol /* oprot */) (success bool, err thrift.TException) {
 	return false, thrift.NewTApplicationException(0, h.err.Error())
 }
 
@@ -153,31 +143,36 @@ func TestProcessor_HandlerError(t *testing.T) {
 	)
 }
 
+// TestJaegerProcessor instantiates a real UDP receiver and a real gRPC collector
+// and executes end-to-end batch submission.
 func TestJaegerProcessor(t *testing.T) {
 	tests := []struct {
 		factory thrift.TProtocolFactory
+		name    string
 	}{
-		{compactFactory},
-		{binaryFactory},
+		{compactFactory, "compact"},
+		{binaryFactory, "binary"},
 	}
 
 	for _, test := range tests {
-		metricsFactory, collector, reporter, conn := initCollectorAndReporter(t)
+		t.Run(test.name, func(t *testing.T) {
+			metricsFactory, collector, reporter, conn := initCollectorAndReporter(t)
 
-		hostPort, processor := createProcessor(t, metricsFactory, test.factory, agent.NewAgentProcessor(reporter))
+			hostPort, processor := createProcessor(t, metricsFactory, test.factory, agent.NewAgentProcessor(reporter))
 
-		client, clientCloser, err := testutils.NewJaegerThriftUDPClient(hostPort, test.factory)
-		require.NoError(t, err)
+			client, clientCloser, err := testutils.NewJaegerThriftUDPClient(hostPort, test.factory)
+			require.NoError(t, err)
 
-		err = client.EmitBatch(context.Background(), batch)
-		require.NoError(t, err)
+			err = client.EmitBatch(context.Background(), batch)
+			require.NoError(t, err)
 
-		assertJaegerProcessorCorrectness(t, collector, metricsFactory)
+			assertJaegerProcessorCorrectness(t, collector, metricsFactory)
 
-		processor.Stop()
-		clientCloser.Close()
-		conn.Close()
-		collector.Close()
+			processor.Stop()
+			clientCloser.Close()
+			conn.Close()
+			collector.Close()
+		})
 	}
 }
 
@@ -188,7 +183,7 @@ func assertJaegerProcessorCorrectness(t *testing.T, collector *testutils.GrpcCol
 	nameF := func() string {
 		return collector.GetJaegerBatches()[0].Spans[0].OperationName
 	}
-	assertProcessorCorrectness(t, metricsFactory, sizeF, nameF, "jaeger")
+	assertCollectorReceivedData(t, metricsFactory, sizeF, nameF, "jaeger")
 }
 
 func assertZipkinProcessorCorrectness(t *testing.T, collector *testutils.GrpcCollector, metricsFactory *metricstest.Factory) {
@@ -198,37 +193,40 @@ func assertZipkinProcessorCorrectness(t *testing.T, collector *testutils.GrpcCol
 	nameF := func() string {
 		return collector.GetJaegerBatches()[0].Spans[0].OperationName
 	}
-	assertProcessorCorrectness(t, metricsFactory, sizeF, nameF, "zipkin")
+	assertCollectorReceivedData(t, metricsFactory, sizeF, nameF, "zipkin")
 }
 
-func assertProcessorCorrectness(
+// assertCollectorReceivedData verifies that collector received the data
+// and that agent reporter emitted corresponding metrics.
+func assertCollectorReceivedData(
 	t *testing.T,
 	metricsFactory *metricstest.Factory,
 	sizeF func() int,
 	nameF func() string,
 	format string,
 ) {
-	// wait for server to receive
-	for i := 0; i < 1000; i++ {
-		if sizeF() == 1 {
-			break
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
-
-	require.Equal(t, 1, sizeF())
+	require.Eventually(t,
+		func() bool { return sizeF() == 1 },
+		5*time.Second,
+		time.Millisecond,
+		"server should have received spans")
 	assert.Equal(t, testSpanName, nameF())
 
-	// wait for reporter to emit metrics
-	for i := 0; i < 1000; i++ {
+	key := "reporter.spans.submitted|format=" + format
+	ok := assert.Eventuallyf(t,
+		func() bool {
+			c, _ := metricsFactory.Snapshot()
+			_, ok := c[key]
+			return ok
+		},
+		5*time.Second,
+		time.Millisecond,
+		"reporter should have emitted metric %s", key)
+	if !ok {
 		c, _ := metricsFactory.Snapshot()
-		if _, ok := c["tc-reporter.spans.submitted"]; ok {
-			break
-		}
-		time.Sleep(1 * time.Millisecond)
+		t.Log("all metrics", c)
 	}
 
-	// agentReporter must emit metrics
 	metricsFactory.AssertCounterMetrics(t, []metricstest.ExpectedMetric{
 		{Name: "reporter.batches.submitted", Tags: map[string]string{"format": format}, Value: 1},
 		{Name: "reporter.spans.submitted", Tags: map[string]string{"format": format}, Value: 1},

@@ -1,0 +1,85 @@
+# Inspired by https://github.com/actions/setup-go/issues/21#issuecomment-997208686
+name: 'Install Go Tip'
+description: 'Install Go Tip toolchain'
+runs:
+  using: "composite"
+  steps:
+    - name: Download Go Tip
+      id: download
+      shell: bash
+      run: |
+        echo Download Go Tip
+        set -euo pipefail
+        tip=$(git ls-remote https://github.com/golang/go.git HEAD | awk '{print $1;}')
+        echo "Go Tip version: ${tip}"
+        retries=3
+        wait_time=10
+        success=false
+        for ((i=1; i<=retries; i++)); do
+          url="https://storage.googleapis.com/go-build-snap/go/linux-amd64/${tip}.tar.gz"
+          if curl -fsSL -o gotip.tar.gz "$url"; then
+            success=true
+            break
+          fi
+          echo "Failed to download. Retrying in $wait_time seconds..."
+          sleep $wait_time
+        done
+        echo "success=${success}" >> $GITHUB_OUTPUT
+
+    - name: Unpack gotip bundle
+      if: steps.download.outputs.success == 'true'
+      shell: bash
+      run: |
+        echo Unpack gotip bundle
+        set -euo pipefail
+        echo "Downloaded bundle:"
+        ls -lah gotip.tar.gz
+        export GOROOT="$HOME/sdk/gotip"
+        mkdir -p $GOROOT
+        tar -C $GOROOT -xzf gotip.tar.gz
+        echo "GOROOT=$GOROOT" >> $GITHUB_ENV
+
+    # If download failed, we will try to build tip from source.
+    # This requires Go toolchain, so install it first.
+    - name: Install Go toolchain
+      if: steps.download.outputs.success == 'false'
+      uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      with:
+        go-version: 1.24.x
+
+    - name: Build Go Tip from source
+      if: steps.download.outputs.success == 'false'
+      shell: bash
+      run: |
+        echo Build Go Tip from source
+        set -euo pipefail
+        go install golang.org/dl/gotip@latest
+        gotip download
+        export GOROOT="$(gotip env GOROOT)"
+        echo "GOROOT=$GOROOT" >> $GITHUB_ENV
+        # for some reason even though we put gotip at the front of PATH later,
+        # the go binary installed in previous step still takes precedence. So remove it.
+        rm -f $(which go)
+
+    - name: Setup Go environment
+      shell: bash
+      run: |
+        echo Setup Go environment
+        set -euo pipefail
+        $GOROOT/bin/go version
+        GOPATH="$HOME/gotip"
+        PATH="$GOROOT/bin:$GOPATH/bin:$PATH"
+        echo "GOPATH=$GOPATH" >> $GITHUB_ENV
+        echo "PATH=$PATH" >> $GITHUB_ENV
+
+    - name: Check Go Version
+      shell: bash
+      run: |
+        echo Check Go Version
+        set -euo pipefail
+        echo "GOPATH=$GOPATH"
+        echo "GOROOT=$GOROOT"
+        echo "which go:"
+        which -a go
+        echo "Active Go version:"
+        go version

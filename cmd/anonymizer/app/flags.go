@@ -1,16 +1,5 @@
 // Copyright (c) 2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -28,6 +17,8 @@ type Options struct {
 	HashCustomTags    bool
 	HashLogs          bool
 	HashProcess       bool
+	StartTime         int64
+	EndTime           int64
 }
 
 const (
@@ -39,6 +30,8 @@ const (
 	hashLogsFlag          = "hash-logs"
 	hashProcessFlag       = "hash-process"
 	maxSpansCount         = "max-spans-count"
+	startTime             = "start-time"
+	endTime               = "end-time"
 )
 
 // AddFlags adds flags for anonymizer main program
@@ -83,6 +76,16 @@ func (o *Options) AddFlags(command *cobra.Command) {
 		maxSpansCount,
 		-1,
 		"The maximum number of spans to anonymize")
+	command.Flags().Int64Var(
+		&o.StartTime,
+		startTime,
+		0,
+		"The start time of time window for searching trace, timestampe in unix nanoseconds")
+	command.Flags().Int64Var(
+		&o.EndTime,
+		endTime,
+		0,
+		"The end time of time window for searching trace, timestampe in unix nanoseconds")
 
 	// mark traceid flag as mandatory
 	command.MarkFlagRequired(traceIDFlag)

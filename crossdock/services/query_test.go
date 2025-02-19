@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package services
 
@@ -22,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	ui "github.com/jaegertracing/jaeger/model/json"
@@ -29,7 +19,7 @@ import (
 
 type testQueryHandler struct{}
 
-func (h *testQueryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (*testQueryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	svc := r.FormValue("service")
 	body := []byte("bad json")
 	if svc == "svc" {
@@ -51,23 +41,24 @@ func TestGetTraces(t *testing.T) {
 	// Test with no http server
 	query := NewQueryService("", zap.NewNop())
 	_, err := query.GetTraces("svc", "op", map[string]string{"key": "value"})
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	query = NewQueryService(server.URL, zap.NewNop())
 	traces, err := query.GetTraces("svc", "op", map[string]string{"key": "value"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Len(t, traces, 1)
 	assert.EqualValues(t, "traceid", traces[0].TraceID)
 
 	_, err = query.GetTraces("bad_svc", "op", map[string]string{"key": "value"})
-	assert.Error(t, err)
+	require.Error(t, err)
 }
 
 func TestGetTracesReadAllErr(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "1")
 	}))
+	defer server.Close()
 	query := NewQueryService(server.URL, zap.NewNop())
 	_, err := query.GetTraces("svc", "op", map[string]string{"key": "value"})
-	assert.EqualError(t, err, "unexpected EOF")
+	require.EqualError(t, err, "unexpected EOF")
 }

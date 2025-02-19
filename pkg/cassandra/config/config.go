@@ -1,162 +1,227 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package config
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/asaskevich/govalidator"
 	"github.com/gocql/gocql"
-	"go.uber.org/zap"
-
-	"github.com/jaegertracing/jaeger/pkg/cassandra"
-	gocqlw "github.com/jaegertracing/jaeger/pkg/cassandra/gocql"
-	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
+	"go.opentelemetry.io/collector/config/configtls"
 )
 
-// Configuration describes the configuration properties needed to connect to a Cassandra cluster
+// Configuration describes the configuration properties needed to connect to a Cassandra cluster.
 type Configuration struct {
-	Servers              []string       `validate:"nonzero" mapstructure:"servers"`
-	Keyspace             string         `validate:"nonzero" mapstructure:"keyspace"`
-	LocalDC              string         `yaml:"local_dc" mapstructure:"local_dc"`
-	ConnectionsPerHost   int            `validate:"min=1" yaml:"connections_per_host" mapstructure:"connections_per_host"`
-	Timeout              time.Duration  `validate:"min=500" mapstructure:"-"`
-	ConnectTimeout       time.Duration  `yaml:"connect_timeout" mapstructure:"connection_timeout"`
-	ReconnectInterval    time.Duration  `validate:"min=500" yaml:"reconnect_interval" mapstructure:"reconnect_interval"`
-	SocketKeepAlive      time.Duration  `validate:"min=0" yaml:"socket_keep_alive" mapstructure:"socket_keep_alive"`
-	MaxRetryAttempts     int            `validate:"min=0" yaml:"max_retry_attempt" mapstructure:"max_retry_attempts"`
-	ProtoVersion         int            `yaml:"proto_version" mapstructure:"proto_version"`
-	Consistency          string         `yaml:"consistency" mapstructure:"consistency"`
-	DisableCompression   bool           `yaml:"disable-compression" mapstructure:"disable_compression"`
-	Port                 int            `yaml:"port" mapstructure:"port"`
-	Authenticator        Authenticator  `yaml:"authenticator" mapstructure:",squash"`
-	DisableAutoDiscovery bool           `yaml:"disable_auto_discovery" mapstructure:"-"`
-	TLS                  tlscfg.Options `mapstructure:"tls"`
+	Schema     Schema     `mapstructure:"schema"`
+	Connection Connection `mapstructure:"connection"`
+	Query      Query      `mapstructure:"query"`
 }
 
-// Authenticator holds the authentication properties needed to connect to a Cassandra cluster
+type Connection struct {
+	// Servers contains a list of hosts that are used to connect to the cluster.
+	Servers []string `mapstructure:"servers" valid:"required,url"`
+	// LocalDC contains the name of the local Data Center (DC) for DC-aware host selection
+	LocalDC string `mapstructure:"local_dc"`
+	// The port used when dialing to a cluster.
+	Port int `mapstructure:"port"`
+	// DisableAutoDiscovery, if set to true, will disable the cluster's auto-discovery features.
+	DisableAutoDiscovery bool `mapstructure:"disable_auto_discovery"`
+	// ConnectionsPerHost contains the maximum number of open connections for each host on the cluster.
+	ConnectionsPerHost int `mapstructure:"connections_per_host"`
+	// ReconnectInterval contains the regular interval after which the driver tries to connect to
+	// nodes that are down.
+	ReconnectInterval time.Duration `mapstructure:"reconnect_interval"`
+	// SocketKeepAlive contains the keep alive period for the default dialer to the cluster.
+	SocketKeepAlive time.Duration `mapstructure:"socket_keep_alive"`
+	// TLS contains the TLS configuration for the connection to the cluster.
+	TLS configtls.ClientConfig `mapstructure:"tls"`
+	// Timeout contains the maximum time spent to connect to a cluster.
+	Timeout time.Duration `mapstructure:"timeout"`
+	// Authenticator contains the details of the authentication mechanism that is used for
+	// connecting to a cluster.
+	Authenticator Authenticator `mapstructure:"auth"`
+	// ProtoVersion contains the version of the native protocol to use when connecting to a cluster.
+	ProtoVersion int `mapstructure:"proto_version"`
+}
+
+type Schema struct {
+	// Keyspace contains the namespace where Jaeger data will be stored.
+	Keyspace string `mapstructure:"keyspace"`
+	// DisableCompression, if set to true, disables the use of the default Snappy Compression
+	// while connecting to the Cassandra Cluster. This is useful for connecting to clusters, like Azure Cosmos DB,
+	// that do not support SnappyCompression.
+	DisableCompression bool `mapstructure:"disable_compression"`
+	// CreateSchema tells if the schema ahould be created during session initialization based on the configs provided
+	CreateSchema bool `mapstructure:"create" valid:"optional"`
+	// Datacenter is the name for network topology
+	Datacenter string `mapstructure:"datacenter" valid:"optional"`
+	// TraceTTL is Time To Live (TTL) for the trace data. Should at least be 1 second
+	TraceTTL time.Duration `mapstructure:"trace_ttl" valid:"optional"`
+	// DependenciesTTL is Time To Live (TTL) for dependencies data. Should at least be 1 second
+	DependenciesTTL time.Duration `mapstructure:"dependencies_ttl" valid:"optional"`
+	// Replication factor for the db
+	ReplicationFactor int `mapstructure:"replication_factor" valid:"optional"`
+	// CompactionWindow is the size of the window for TimeWindowCompactionStrategy.
+	// All SSTables within that window are grouped together into one SSTable.
+	// Ideally, operators should select a compaction window size that produces approximately less than 50 windows.
+	// For example, if writing with a 90 day TTL, a 3 day window would be a reasonable choice.
+	CompactionWindow time.Duration `mapstructure:"compaction_window" valid:"optional"`
+}
+
+type Query struct {
+	// Timeout contains the maximum time spent executing a query.
+	Timeout time.Duration `mapstructure:"timeout"`
+	// MaxRetryAttempts indicates the maximum number of times a query will be retried for execution.
+	MaxRetryAttempts int `mapstructure:"max_retry_attempts"`
+	// Consistency specifies the consistency level which needs to be satisified before responding
+	// to a query.
+	Consistency string `mapstructure:"consistency"`
+}
+
+// Authenticator holds the authentication properties needed to connect to a Cassandra cluster.
 type Authenticator struct {
-	Basic BasicAuthenticator `yaml:"basic" mapstructure:",squash"`
+	Basic BasicAuthenticator `mapstructure:"basic"`
 	// TODO: add more auth types
 }
 
-// BasicAuthenticator holds the username and password for a password authenticator for a Cassandra cluster
+// BasicAuthenticator holds the username and password for a password authenticator for a Cassandra cluster.
 type BasicAuthenticator struct {
-	Username string `yaml:"username" mapstructure:"username"`
-	Password string `yaml:"password" mapstructure:"password" json:"-"`
+	Username              string   `mapstructure:"username"`
+	Password              string   `mapstructure:"password" json:"-"`
+	AllowedAuthenticators []string `mapstructure:"allowed_authenticators"`
+}
+
+func DefaultConfiguration() Configuration {
+	return Configuration{
+		Schema: Schema{
+			CreateSchema:      false,
+			Keyspace:          "jaeger_dc1",
+			Datacenter:        "dc1",
+			TraceTTL:          2 * 24 * time.Hour,
+			DependenciesTTL:   2 * 24 * time.Hour,
+			ReplicationFactor: 1,
+			CompactionWindow:  2 * time.Hour,
+		},
+		Connection: Connection{
+			Servers:            []string{"127.0.0.1"},
+			Port:               9042,
+			ProtoVersion:       4,
+			ConnectionsPerHost: 2,
+			ReconnectInterval:  60 * time.Second,
+		},
+		Query: Query{
+			MaxRetryAttempts: 3,
+		},
+	}
 }
 
 // ApplyDefaults copies settings from source unless its own value is non-zero.
 func (c *Configuration) ApplyDefaults(source *Configuration) {
-	if c.ConnectionsPerHost == 0 {
-		c.ConnectionsPerHost = source.ConnectionsPerHost
+	if c.Schema.Keyspace == "" {
+		c.Schema.Keyspace = source.Schema.Keyspace
 	}
-	if c.MaxRetryAttempts == 0 {
-		c.MaxRetryAttempts = source.MaxRetryAttempts
-	}
-	if c.Timeout == 0 {
-		c.Timeout = source.Timeout
-	}
-	if c.ReconnectInterval == 0 {
-		c.ReconnectInterval = source.ReconnectInterval
-	}
-	if c.Port == 0 {
-		c.Port = source.Port
-	}
-	if c.Keyspace == "" {
-		c.Keyspace = source.Keyspace
-	}
-	if c.ProtoVersion == 0 {
-		c.ProtoVersion = source.ProtoVersion
-	}
-	if c.SocketKeepAlive == 0 {
-		c.SocketKeepAlive = source.SocketKeepAlive
-	}
-}
 
-// SessionBuilder creates new cassandra.Session
-type SessionBuilder interface {
-	NewSession(logger *zap.Logger) (cassandra.Session, error)
-}
+	if c.Schema.Datacenter == "" {
+		c.Schema.Datacenter = source.Schema.Datacenter
+	}
 
-// NewSession creates a new Cassandra session
-func (c *Configuration) NewSession(logger *zap.Logger) (cassandra.Session, error) {
-	cluster, err := c.NewCluster(logger)
-	if err != nil {
-		return nil, err
+	if c.Schema.TraceTTL == 0 {
+		c.Schema.TraceTTL = source.Schema.TraceTTL
 	}
-	session, err := cluster.CreateSession()
-	if err != nil {
-		return nil, err
+
+	if c.Schema.DependenciesTTL == 0 {
+		c.Schema.DependenciesTTL = source.Schema.DependenciesTTL
 	}
-	return gocqlw.WrapCQLSession(session), nil
+
+	if c.Schema.ReplicationFactor == 0 {
+		c.Schema.ReplicationFactor = source.Schema.ReplicationFactor
+	}
+
+	if c.Schema.CompactionWindow == 0 {
+		c.Schema.CompactionWindow = source.Schema.CompactionWindow
+	}
+
+	if c.Connection.ConnectionsPerHost == 0 {
+		c.Connection.ConnectionsPerHost = source.Connection.ConnectionsPerHost
+	}
+	if c.Connection.ReconnectInterval == 0 {
+		c.Connection.ReconnectInterval = source.Connection.ReconnectInterval
+	}
+	if c.Connection.Port == 0 {
+		c.Connection.Port = source.Connection.Port
+	}
+	if c.Connection.ProtoVersion == 0 {
+		c.Connection.ProtoVersion = source.Connection.ProtoVersion
+	}
+	if c.Connection.SocketKeepAlive == 0 {
+		c.Connection.SocketKeepAlive = source.Connection.SocketKeepAlive
+	}
+	if c.Query.MaxRetryAttempts == 0 {
+		c.Query.MaxRetryAttempts = source.Query.MaxRetryAttempts
+	}
+	if c.Query.Timeout == 0 {
+		c.Query.Timeout = source.Query.Timeout
+	}
 }
 
 // NewCluster creates a new gocql cluster from the configuration
-func (c *Configuration) NewCluster(logger *zap.Logger) (*gocql.ClusterConfig, error) {
-	cluster := gocql.NewCluster(c.Servers...)
-	cluster.Keyspace = c.Keyspace
-	cluster.NumConns = c.ConnectionsPerHost
-	cluster.Timeout = c.Timeout
-	cluster.ConnectTimeout = c.ConnectTimeout
-	cluster.ReconnectInterval = c.ReconnectInterval
-	cluster.SocketKeepalive = c.SocketKeepAlive
-	if c.ProtoVersion > 0 {
-		cluster.ProtoVersion = c.ProtoVersion
+func (c *Configuration) NewCluster() (*gocql.ClusterConfig, error) {
+	cluster := gocql.NewCluster(c.Connection.Servers...)
+	cluster.Keyspace = c.Schema.Keyspace
+	cluster.NumConns = c.Connection.ConnectionsPerHost
+	cluster.ConnectTimeout = c.Connection.Timeout
+	cluster.ReconnectInterval = c.Connection.ReconnectInterval
+	cluster.SocketKeepalive = c.Connection.SocketKeepAlive
+	cluster.Timeout = c.Query.Timeout
+	if c.Connection.ProtoVersion > 0 {
+		cluster.ProtoVersion = c.Connection.ProtoVersion
 	}
-	if c.MaxRetryAttempts > 1 {
-		cluster.RetryPolicy = &gocql.SimpleRetryPolicy{NumRetries: c.MaxRetryAttempts - 1}
+	if c.Query.MaxRetryAttempts > 1 {
+		cluster.RetryPolicy = &gocql.SimpleRetryPolicy{NumRetries: c.Query.MaxRetryAttempts - 1}
 	}
-	if c.Port != 0 {
-		cluster.Port = c.Port
+	if c.Connection.Port != 0 {
+		cluster.Port = c.Connection.Port
 	}
 
-	if !c.DisableCompression {
+	if !c.Schema.DisableCompression {
 		cluster.Compressor = gocql.SnappyCompressor{}
 	}
 
-	if c.Consistency == "" {
+	if c.Query.Consistency == "" {
 		cluster.Consistency = gocql.LocalOne
 	} else {
-		cluster.Consistency = gocql.ParseConsistency(c.Consistency)
+		cluster.Consistency = gocql.ParseConsistency(c.Query.Consistency)
 	}
 
 	fallbackHostSelectionPolicy := gocql.RoundRobinHostPolicy()
-	if c.LocalDC != "" {
-		fallbackHostSelectionPolicy = gocql.DCAwareRoundRobinPolicy(c.LocalDC)
+	if c.Connection.LocalDC != "" {
+		fallbackHostSelectionPolicy = gocql.DCAwareRoundRobinPolicy(c.Connection.LocalDC)
 	}
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(fallbackHostSelectionPolicy, gocql.ShuffleReplicas())
 
-	if c.Authenticator.Basic.Username != "" && c.Authenticator.Basic.Password != "" {
+	if c.Connection.Authenticator.Basic.Username != "" && c.Connection.Authenticator.Basic.Password != "" {
 		cluster.Authenticator = gocql.PasswordAuthenticator{
-			Username: c.Authenticator.Basic.Username,
-			Password: c.Authenticator.Basic.Password,
+			Username:              c.Connection.Authenticator.Basic.Username,
+			Password:              c.Connection.Authenticator.Basic.Password,
+			AllowedAuthenticators: c.Connection.Authenticator.Basic.AllowedAuthenticators,
 		}
 	}
-	tlsCfg, err := c.TLS.Config(logger)
-	if err != nil {
-		return nil, err
-	}
-	if c.TLS.Enabled {
+	if !c.Connection.TLS.Insecure {
+		tlsCfg, err := c.Connection.TLS.LoadTLSConfig(context.Background())
+		if err != nil {
+			return nil, err
+		}
 		cluster.SslOpts = &gocql.SslOptions{
 			Config: tlsCfg,
 		}
 	}
 	// If tunneling connection to C*, disable cluster autodiscovery features.
-	if c.DisableAutoDiscovery {
+	if c.Connection.DisableAutoDiscovery {
 		cluster.DisableInitialHostLookup = true
 		cluster.IgnorePeerAddr = true
 	}
@@ -165,4 +230,29 @@ func (c *Configuration) NewCluster(logger *zap.Logger) (*gocql.ClusterConfig, er
 
 func (c *Configuration) String() string {
 	return fmt.Sprintf("%+v", *c)
+}
+
+func isValidTTL(duration time.Duration) bool {
+	return duration == 0 || duration >= time.Second
+}
+
+func (c *Configuration) Validate() error {
+	_, err := govalidator.ValidateStruct(c)
+	if err != nil {
+		return err
+	}
+
+	if !isValidTTL(c.Schema.TraceTTL) {
+		return errors.New("trace_ttl can either be 0 or greater than or equal to 1 second")
+	}
+
+	if !isValidTTL(c.Schema.DependenciesTTL) {
+		return errors.New("dependencies_ttl can either be 0 or greater than or equal to 1 second")
+	}
+
+	if c.Schema.CompactionWindow < time.Minute {
+		return errors.New("compaction_window should at least be 1 minute")
+	}
+
+	return nil
 }

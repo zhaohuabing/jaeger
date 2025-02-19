@@ -1,18 +1,22 @@
-ARG golang_image
+# Copyright (c) 2024 The Jaeger Authors.
+# SPDX-License-Identifier: Apache-2.0
 
-FROM $golang_image AS build
+FROM golang:1.24.0-alpine AS build
 ARG TARGETARCH
 ENV GOPATH /go
 RUN apk add --update --no-cache ca-certificates make git build-base mailcap
-#Once go-delve adds support for s390x (see PR #2948), remove this entire conditional.
-#Once go-delve adds support for ppc64le (see PR go-delve/delve#1564), remove this entire conditional.
-RUN if [[ "$TARGETARCH" == "s390x"  ||  "$TARGETARCH" == "ppc64le" ]] ; then \
+
+COPY go.mod go.sum /go/src/debug-delve/ 
+
+# TODO: Remove s390x once go-delve adds support for it (https://github.com/go-delve/delve/issues/2883)
+# TODO: Remove ppc64le once support is released (https://github.com/go-delve/delve/issues/1564) - not yet as of delve@v1.22.1
+RUN if [[ "$TARGETARCH" == "s390x" ||  "$TARGETARCH" == "ppc64le" ]] ; then \
 	touch /go/bin/dlv; \
     else \
-        go install github.com/go-delve/delve/cmd/dlv@latest; \
-    fi
+        cd /go/src/debug-delve && go mod download && go build -o /go/bin/dlv github.com/go-delve/delve/cmd/dlv; \
+    fi 
 
-FROM $golang_image
+FROM golang:1.24.0-alpine
 COPY --from=build /go/bin/dlv /go/bin/dlv
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /etc/mime.types /etc/mime.types

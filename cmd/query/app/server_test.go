@@ -1,113 +1,134 @@
 // Copyright (c) 2019,2020 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/opentracing/opentracing-go"
+	"github.com/gogo/protobuf/jsonpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/confignet"
+	"go.opentelemetry.io/collector/config/configtls"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/jaegertracing/jaeger/cmd/flags"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
+	"github.com/jaegertracing/jaeger/cmd/internal/flags"
 	"github.com/jaegertracing/jaeger/cmd/query/app/querysvc"
+	v2querysvc "github.com/jaegertracing/jaeger/cmd/query/app/querysvc/v2/querysvc"
 	"github.com/jaegertracing/jaeger/internal/grpctest"
-	"github.com/jaegertracing/jaeger/model"
-	"github.com/jaegertracing/jaeger/pkg/config/tlscfg"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore"
+	spanstoremocks "github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore/mocks"
+	depsmocks "github.com/jaegertracing/jaeger/internal/storage/v2/api/depstore/mocks"
+	"github.com/jaegertracing/jaeger/internal/storage/v2/v1adapter"
 	"github.com/jaegertracing/jaeger/pkg/healthcheck"
+	"github.com/jaegertracing/jaeger/pkg/jtracer"
+	"github.com/jaegertracing/jaeger/pkg/telemetry"
 	"github.com/jaegertracing/jaeger/pkg/tenancy"
 	"github.com/jaegertracing/jaeger/ports"
-	"github.com/jaegertracing/jaeger/proto-gen/api_v2"
-	depsmocks "github.com/jaegertracing/jaeger/storage/dependencystore/mocks"
-	spanstoremocks "github.com/jaegertracing/jaeger/storage/spanstore/mocks"
 )
 
 var testCertKeyLocation = "../../../pkg/config/tlscfg/testdata"
 
+func initTelSet(logger *zap.Logger, tracerProvider *jtracer.JTracer, hc *healthcheck.HealthCheck) telemetry.Settings {
+	telset := telemetry.NoopSettings()
+	telset.Logger = logger
+	telset.TracerProvider = tracerProvider.OTEL
+	telset.ReportStatus = telemetry.HCAdapter(hc)
+	return telset
+}
+
 func TestServerError(t *testing.T) {
 	srv := &Server{
 		queryOptions: &QueryOptions{
-			HTTPHostPort: ":-1",
+			HTTP: confighttp.ServerConfig{Endpoint: ":-1"},
 		},
 	}
-	assert.Error(t, srv.Start())
+	require.Error(t, srv.Start(context.Background()))
 }
 
 func TestCreateTLSServerSinglePortError(t *testing.T) {
 	// When TLS is enabled, and the host-port of both servers are the same, this leads to error, as TLS-enabled server is required to run on dedicated port.
-	tlsCfg := tlscfg.Options{
-		Enabled:      true,
-		CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-		KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-		ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+	tlsCfg := configtls.ServerConfig{
+		ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
+		Config: configtls.Config{
+			CertFile: testCertKeyLocation + "/example-server-cert.pem",
+			KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+		},
 	}
-
-	_, err := NewServer(zap.NewNop(), &querysvc.QueryService{}, nil,
-		&QueryOptions{HTTPHostPort: ":8080", GRPCHostPort: ":8080", TLSGRPC: tlsCfg, TLSHTTP: tlsCfg},
-		tenancy.NewManager(&tenancy.Options{}), opentracing.NoopTracer{})
-	assert.NotNil(t, err)
+	telset := initTelSet(zaptest.NewLogger(t), jtracer.NoOp(), healthcheck.New())
+	_, err := NewServer(context.Background(), &querysvc.QueryService{}, &v2querysvc.QueryService{}, nil,
+		&QueryOptions{
+			HTTP: confighttp.ServerConfig{Endpoint: ":8080", TLSSetting: &tlsCfg},
+			GRPC: configgrpc.ServerConfig{NetAddr: confignet.AddrConfig{Endpoint: ":8080", Transport: confignet.TransportTypeTCP}, TLSSetting: &tlsCfg},
+		},
+		tenancy.NewManager(&tenancy.Options{}), telset)
+	require.Error(t, err)
 }
 
 func TestCreateTLSGrpcServerError(t *testing.T) {
-	tlsCfg := tlscfg.Options{
-		Enabled:      true,
-		CertPath:     "invalid/path",
-		KeyPath:      "invalid/path",
-		ClientCAPath: "invalid/path",
+	tlsCfg := configtls.ServerConfig{
+		ClientCAFile: "invalid/path",
+		Config: configtls.Config{
+			CertFile: "invalid/path",
+			KeyFile:  "invalid/path",
+		},
 	}
-
-	_, err := NewServer(zap.NewNop(), &querysvc.QueryService{}, nil,
-		&QueryOptions{HTTPHostPort: ":8080", GRPCHostPort: ":8081", TLSGRPC: tlsCfg},
-		tenancy.NewManager(&tenancy.Options{}), opentracing.NoopTracer{})
-	assert.NotNil(t, err)
+	telset := initTelSet(zaptest.NewLogger(t), jtracer.NoOp(), healthcheck.New())
+	_, err := NewServer(context.Background(), &querysvc.QueryService{}, &v2querysvc.QueryService{}, nil,
+		&QueryOptions{
+			HTTP: confighttp.ServerConfig{Endpoint: ":8080"},
+			GRPC: configgrpc.ServerConfig{NetAddr: confignet.AddrConfig{Endpoint: ":8081", Transport: confignet.TransportTypeTCP}, TLSSetting: &tlsCfg},
+		},
+		tenancy.NewManager(&tenancy.Options{}), telset)
+	require.Error(t, err)
 }
 
-func TestCreateTLSHttpServerError(t *testing.T) {
-	tlsCfg := tlscfg.Options{
-		Enabled:      true,
-		CertPath:     "invalid/path",
-		KeyPath:      "invalid/path",
-		ClientCAPath: "invalid/path",
+func TestStartTLSHttpServerError(t *testing.T) {
+	tlsCfg := configtls.ServerConfig{
+		ClientCAFile: "invalid/path",
+		Config: configtls.Config{
+			CertFile: "invalid/path",
+			KeyFile:  "invalid/path",
+		},
 	}
-
-	_, err := NewServer(zap.NewNop(), &querysvc.QueryService{}, nil,
-		&QueryOptions{HTTPHostPort: ":8080", GRPCHostPort: ":8081", TLSHTTP: tlsCfg},
-		tenancy.NewManager(&tenancy.Options{}), opentracing.NoopTracer{})
-	assert.NotNil(t, err)
+	telset := initTelSet(zaptest.NewLogger(t), jtracer.NoOp(), healthcheck.New())
+	s, err := NewServer(context.Background(), &querysvc.QueryService{}, &v2querysvc.QueryService{}, nil,
+		&QueryOptions{
+			HTTP: confighttp.ServerConfig{Endpoint: ":8080", TLSSetting: &tlsCfg},
+			GRPC: configgrpc.ServerConfig{NetAddr: confignet.AddrConfig{Endpoint: ":8081", Transport: confignet.TransportTypeTCP}},
+		}, tenancy.NewManager(&tenancy.Options{}), telset)
+	require.NoError(t, err)
+	require.Error(t, s.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, s.Close())
+	})
 }
 
 var testCases = []struct {
 	name              string
-	TLS               tlscfg.Options
+	TLS               *configtls.ServerConfig
 	HTTPTLSEnabled    bool
 	GRPCTLSEnabled    bool
-	clientTLS         tlscfg.Options
-	expectError       bool
+	clientTLS         configtls.ClientConfig
 	expectClientError bool
 	expectServerFail  bool
 }{
@@ -116,13 +137,9 @@ var testCases = []struct {
 		name:           "Should pass with insecure connection",
 		HTTPTLSEnabled: false,
 		GRPCTLSEnabled: false,
-		TLS: tlscfg.Options{
-			Enabled: false,
+		clientTLS: configtls.ClientConfig{
+			Insecure: true,
 		},
-		clientTLS: tlscfg.Options{
-			Enabled: false,
-		},
-		expectError:       false,
 		expectClientError: false,
 		expectServerFail:  false,
 	},
@@ -130,16 +147,16 @@ var testCases = []struct {
 		name:           "should fail with TLS client to untrusted TLS server",
 		HTTPTLSEnabled: true,
 		GRPCTLSEnabled: true,
-		TLS: tlscfg.Options{
-			Enabled:  true,
-			CertPath: testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:  testCertKeyLocation + "/example-server-key.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
+		clientTLS: configtls.ClientConfig{
+			Insecure:   true,
 			ServerName: "example.com",
 		},
-		expectError:       true,
 		expectClientError: true,
 		expectServerFail:  false,
 	},
@@ -147,17 +164,19 @@ var testCases = []struct {
 		name:           "should fail with TLS client to trusted TLS server with incorrect hostname",
 		HTTPTLSEnabled: true,
 		GRPCTLSEnabled: true,
-		TLS: tlscfg.Options{
-			Enabled:  true,
-			CertPath: testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:  testCertKeyLocation + "/example-server-key.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: configtls.ClientConfig{
+			Insecure:   false,
 			ServerName: "nonEmpty",
+			Config: configtls.Config{
+				CAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			},
 		},
-		expectError:       true,
 		expectClientError: true,
 		expectServerFail:  false,
 	},
@@ -165,17 +184,19 @@ var testCases = []struct {
 		name:           "should pass with TLS client to trusted TLS server with correct hostname",
 		HTTPTLSEnabled: true,
 		GRPCTLSEnabled: true,
-		TLS: tlscfg.Options{
-			Enabled:  true,
-			CertPath: testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:  testCertKeyLocation + "/example-server-key.pem",
+		TLS: &configtls.ServerConfig{
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: configtls.ClientConfig{
+			Insecure:   false,
 			ServerName: "example.com",
+			Config: configtls.Config{
+				CAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			},
 		},
-		expectError:       false,
 		expectClientError: false,
 		expectServerFail:  false,
 	},
@@ -183,18 +204,20 @@ var testCases = []struct {
 		name:           "should fail with TLS client without cert to trusted TLS server requiring cert",
 		HTTPTLSEnabled: true,
 		GRPCTLSEnabled: true,
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+		TLS: &configtls.ServerConfig{
+			ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: configtls.ClientConfig{
+			Insecure:   false,
 			ServerName: "example.com",
+			Config: configtls.Config{
+				CAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			},
 		},
-		expectError:       false,
 		expectServerFail:  false,
 		expectClientError: true,
 	},
@@ -202,20 +225,22 @@ var testCases = []struct {
 		name:           "should pass with TLS client with cert to trusted TLS server requiring cert",
 		HTTPTLSEnabled: true,
 		GRPCTLSEnabled: true,
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+		TLS: &configtls.ServerConfig{
+			ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: configtls.ClientConfig{
+			Insecure:   false,
 			ServerName: "example.com",
-			CertPath:   testCertKeyLocation + "/example-client-cert.pem",
-			KeyPath:    testCertKeyLocation + "/example-client-key.pem",
+			Config: configtls.Config{
+				CAFile:   testCertKeyLocation + "/example-CA-cert.pem",
+				CertFile: testCertKeyLocation + "/example-client-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-client-key.pem",
+			},
 		},
-		expectError:       false,
 		expectServerFail:  false,
 		expectClientError: false,
 	},
@@ -223,20 +248,23 @@ var testCases = []struct {
 		name:           "should fail with TLS client without cert to trusted TLS server requiring cert from a different CA",
 		HTTPTLSEnabled: true,
 		GRPCTLSEnabled: true,
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/wrong-CA-cert.pem", // NB: wrong CA
+		TLS: &configtls.ServerConfig{
+			ClientCAFile: testCertKeyLocation + "/wrong-CA-cert.pem", // NB: wrong CA
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+
+		clientTLS: configtls.ClientConfig{
+			Insecure:   false,
 			ServerName: "example.com",
-			CertPath:   testCertKeyLocation + "/example-client-cert.pem",
-			KeyPath:    testCertKeyLocation + "/example-client-key.pem",
+			Config: configtls.Config{
+				CAFile:   testCertKeyLocation + "/example-CA-cert.pem",
+				CertFile: testCertKeyLocation + "/example-client-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-client-key.pem",
+			},
 		},
-		expectError:       false,
 		expectServerFail:  false,
 		expectClientError: true,
 	},
@@ -244,20 +272,22 @@ var testCases = []struct {
 		name:           "should pass with TLS client with cert to trusted TLS HTTP server requiring cert and insecure GRPC server",
 		HTTPTLSEnabled: true,
 		GRPCTLSEnabled: false,
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+		TLS: &configtls.ServerConfig{
+			ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: configtls.ClientConfig{
+			Insecure:   false,
 			ServerName: "example.com",
-			CertPath:   testCertKeyLocation + "/example-client-cert.pem",
-			KeyPath:    testCertKeyLocation + "/example-client-key.pem",
+			Config: configtls.Config{
+				CAFile:   testCertKeyLocation + "/example-CA-cert.pem",
+				CertFile: testCertKeyLocation + "/example-client-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-client-key.pem",
+			},
 		},
-		expectError:       false,
 		expectServerFail:  false,
 		expectClientError: false,
 	},
@@ -265,23 +295,47 @@ var testCases = []struct {
 		name:           "should pass with TLS client with cert to trusted GRPC TLS server requiring cert and insecure HTTP server",
 		HTTPTLSEnabled: false,
 		GRPCTLSEnabled: true,
-		TLS: tlscfg.Options{
-			Enabled:      true,
-			CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-			KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-			ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+		TLS: &configtls.ServerConfig{
+			ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
+			Config: configtls.Config{
+				CertFile: testCertKeyLocation + "/example-server-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+			},
 		},
-		clientTLS: tlscfg.Options{
-			Enabled:    true,
-			CAPath:     testCertKeyLocation + "/example-CA-cert.pem",
+		clientTLS: configtls.ClientConfig{
+			Insecure:   false,
 			ServerName: "example.com",
-			CertPath:   testCertKeyLocation + "/example-client-cert.pem",
-			KeyPath:    testCertKeyLocation + "/example-client-key.pem",
+			Config: configtls.Config{
+				CAFile:   testCertKeyLocation + "/example-CA-cert.pem",
+				CertFile: testCertKeyLocation + "/example-client-cert.pem",
+				KeyFile:  testCertKeyLocation + "/example-client-key.pem",
+			},
 		},
-		expectError:       false,
 		expectServerFail:  false,
 		expectClientError: false,
 	},
+}
+
+type fakeQueryService struct {
+	qs               *querysvc.QueryService
+	spanReader       *spanstoremocks.Reader
+	dependencyReader *depsmocks.Reader
+	expectedServices []string
+}
+
+func makeQuerySvc() *fakeQueryService {
+	spanReader := &spanstoremocks.Reader{}
+	traceReader := v1adapter.NewTraceReader(spanReader)
+	dependencyReader := &depsmocks.Reader{}
+	expectedServices := []string{"test"}
+	spanReader.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(expectedServices, nil)
+	qs := querysvc.NewQueryService(traceReader, dependencyReader, querysvc.QueryServiceOptions{})
+	return &fakeQueryService{
+		qs:               qs,
+		spanReader:       spanReader,
+		dependencyReader: dependencyReader,
+		expectedServices: expectedServices,
+	}
 }
 
 func TestServerHTTPTLS(t *testing.T) {
@@ -289,154 +343,102 @@ func TestServerHTTPTLS(t *testing.T) {
 
 	tests := make([]struct {
 		name              string
-		TLS               tlscfg.Options
+		TLS               *configtls.ServerConfig
 		HTTPTLSEnabled    bool
 		GRPCTLSEnabled    bool
-		clientTLS         tlscfg.Options
-		expectError       bool
+		clientTLS         configtls.ClientConfig
 		expectClientError bool
 		expectServerFail  bool
 	}, testlen)
 	copy(tests, testCases)
 
-	tests[testlen-1].clientTLS = tlscfg.Options{Enabled: false}
+	tests[testlen-1].clientTLS = configtls.ClientConfig{Insecure: true}
 	tests[testlen-1].name = "Should pass with insecure HTTP Client and insecure HTTP server with secure GRPC Server"
-	tests[testlen-1].TLS = tlscfg.Options{
-		Enabled: false,
-	}
+	tests[testlen-1].TLS = nil
 
-	disabledTLSCfg := tlscfg.Options{
-		Enabled: false,
-	}
-	enabledTLSCfg := tlscfg.Options{
-		Enabled:      true,
-		CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-		KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-		ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+	var disabledTLSCfg *configtls.ServerConfig
+	enabledTLSCfg := &configtls.ServerConfig{
+		ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
+		Config: configtls.Config{
+			CertFile: testCertKeyLocation + "/example-server-cert.pem",
+			KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			TLSGRPC := disabledTLSCfg
+			tlsGrpc := disabledTLSCfg
 			if test.GRPCTLSEnabled {
-				TLSGRPC = enabledTLSCfg
+				tlsGrpc = enabledTLSCfg
 			}
 
 			serverOptions := &QueryOptions{
-				GRPCHostPort:           ports.GetAddressFromCLIOptions(ports.QueryGRPC, ""),
-				HTTPHostPort:           ports.GetAddressFromCLIOptions(ports.QueryHTTP, ""),
-				TLSHTTP:                test.TLS,
-				TLSGRPC:                TLSGRPC,
 				BearerTokenPropagation: true,
+				HTTP: confighttp.ServerConfig{
+					Endpoint:   ":0",
+					TLSSetting: test.TLS,
+				},
+				GRPC: configgrpc.ServerConfig{
+					NetAddr: confignet.AddrConfig{
+						Endpoint:  ":0",
+						Transport: confignet.TransportTypeTCP,
+					},
+					TLSSetting: tlsGrpc,
+				},
 			}
 			flagsSvc := flags.NewService(ports.QueryAdminHTTP)
-			flagsSvc.Logger = zap.NewNop()
+			flagsSvc.Logger = zaptest.NewLogger(t)
+			telset := initTelSet(flagsSvc.Logger, jtracer.NoOp(), flagsSvc.HC())
+			querySvc := makeQuerySvc()
+			server, err := NewServer(context.Background(), querySvc.qs, &v2querysvc.QueryService{},
+				nil, serverOptions, tenancy.NewManager(&tenancy.Options{}),
+				telset)
+			require.NoError(t, err)
+			require.NoError(t, server.Start(context.Background()))
+			t.Cleanup(func() {
+				require.NoError(t, server.Close())
+			})
 
-			spanReader := &spanstoremocks.Reader{}
-			dependencyReader := &depsmocks.Reader{}
-			expectedServices := []string{"test"}
-			spanReader.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(expectedServices, nil)
-
-			querySvc := querysvc.NewQueryService(spanReader, dependencyReader, querysvc.QueryServiceOptions{})
-			server, err := NewServer(flagsSvc.Logger, querySvc, nil,
-				serverOptions, tenancy.NewManager(&tenancy.Options{}),
-				opentracing.NoopTracer{})
-			assert.Nil(t, err)
-			assert.NoError(t, server.Start())
-
-			var wg sync.WaitGroup
-			wg.Add(1)
-			once := sync.Once{}
-
-			go func() {
-				for s := range server.HealthCheckStatus() {
-					flagsSvc.HC().Set(s)
-					if s == healthcheck.Unavailable {
-						once.Do(func() {
-							wg.Done()
-						})
-					}
-				}
-			}()
-
-			var clientError error
-			var clientClose func() error
-			var clientTLSCfg *tls.Config
-
-			if serverOptions.TLSHTTP.Enabled {
-
-				var err0 error
-
-				clientTLSCfg, err0 = test.clientTLS.Config(zap.NewNop())
-				require.NoError(t, err0)
-				dialer := &net.Dialer{Timeout: 2 * time.Second}
-				conn, err1 := tls.DialWithDialer(dialer, "tcp", "localhost:"+fmt.Sprintf("%d", ports.QueryHTTP), clientTLSCfg)
-				clientError = err1
-				clientClose = nil
-				if conn != nil {
-					clientClose = conn.Close
-				}
-
-			} else {
-
-				conn, err1 := net.DialTimeout("tcp", "localhost:"+fmt.Sprintf("%d", ports.QueryHTTP), 2*time.Second)
-				clientError = err1
-				clientClose = nil
-				if conn != nil {
-					clientClose = conn.Close
-				}
-			}
-
-			if test.expectError {
-				require.Error(t, clientError)
-			} else {
-				require.NoError(t, clientError)
-			}
-			if clientClose != nil {
-				require.Nil(t, clientClose())
-			}
-
-			if test.HTTPTLSEnabled && test.TLS.ClientCAPath != "" {
+			if test.HTTPTLSEnabled {
+				clientTLSCfg, err := test.clientTLS.LoadTLSConfig(context.Background())
+				require.NoError(t, err)
 				client := &http.Client{
 					Transport: &http.Transport{
 						TLSClientConfig: clientTLSCfg,
 					},
 				}
-				readMock := spanReader
-				readMock.On("FindTraces", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("*spanstore.TraceQueryParameters")).Return([]*model.Trace{mockTrace}, nil).Once()
+				querySvc.spanReader.On("FindTraces", mock.Anything, mock.Anything).Return([]*model.Trace{mockTrace}, nil).Once()
 				queryString := "/api/traces?service=service&start=0&end=0&operation=operation&limit=200&minDuration=20ms"
-				req, err := http.NewRequest("GET", "https://localhost:"+fmt.Sprintf("%d", ports.QueryHTTP)+queryString, nil)
-				assert.Nil(t, err)
+				req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s/%s", server.HTTPAddr(), queryString), nil)
+				require.NoError(t, err)
 				req.Header.Add("Accept", "application/json")
 
-				resp, err2 := client.Do(req)
-				if err2 == nil {
-					resp.Body.Close()
-				}
+				resp, err := client.Do(req)
+				t.Cleanup(func() {
+					if err == nil {
+						resp.Body.Close()
+					}
+				})
 
 				if test.expectClientError {
-					require.Error(t, err2)
+					require.Error(t, err)
 				} else {
-					require.NoError(t, err2)
+					require.NoError(t, err)
+					require.Equal(t, http.StatusOK, resp.StatusCode)
 				}
 			}
-			server.Close()
-			wg.Wait()
-			assert.Equal(t, healthcheck.Unavailable, flagsSvc.HC().Get())
 		})
 	}
 }
 
 func newGRPCClientWithTLS(t *testing.T, addr string, creds credentials.TransportCredentials) *grpcClient {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
 	var conn *grpc.ClientConn
 	var err error
 
 	if creds != nil {
-		conn, err = grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(creds))
+		conn, err = grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	} else {
-		conn, err = grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err = grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
 	require.NoError(t, err)
@@ -451,119 +453,128 @@ func TestServerGRPCTLS(t *testing.T) {
 
 	tests := make([]struct {
 		name              string
-		TLS               tlscfg.Options
+		TLS               *configtls.ServerConfig
 		HTTPTLSEnabled    bool
 		GRPCTLSEnabled    bool
-		clientTLS         tlscfg.Options
-		expectError       bool
+		clientTLS         configtls.ClientConfig
 		expectClientError bool
 		expectServerFail  bool
 	}, testlen)
 	copy(tests, testCases)
-	tests[testlen-2].clientTLS = tlscfg.Options{Enabled: false}
+	tests[testlen-2].clientTLS = configtls.ClientConfig{Insecure: false}
 	tests[testlen-2].name = "should pass with insecure GRPC Client and insecure GRPC server with secure HTTP Server"
-	tests[testlen-2].TLS = tlscfg.Options{
-		Enabled: false,
-	}
+	tests[testlen-2].TLS = nil
 
-	disabledTLSCfg := tlscfg.Options{
-		Enabled: false,
-	}
-	enabledTLSCfg := tlscfg.Options{
-		Enabled:      true,
-		CertPath:     testCertKeyLocation + "/example-server-cert.pem",
-		KeyPath:      testCertKeyLocation + "/example-server-key.pem",
-		ClientCAPath: testCertKeyLocation + "/example-CA-cert.pem",
+	var disabledTLSCfg *configtls.ServerConfig
+	enabledTLSCfg := &configtls.ServerConfig{
+		ClientCAFile: testCertKeyLocation + "/example-CA-cert.pem",
+		Config: configtls.Config{
+			CertFile: testCertKeyLocation + "/example-server-cert.pem",
+			KeyFile:  testCertKeyLocation + "/example-server-key.pem",
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			TLSHTTP := disabledTLSCfg
+			tlsHttp := disabledTLSCfg
 			if test.HTTPTLSEnabled {
-				TLSHTTP = enabledTLSCfg
+				tlsHttp = enabledTLSCfg
 			}
 			serverOptions := &QueryOptions{
-				GRPCHostPort:           ports.GetAddressFromCLIOptions(ports.QueryGRPC, ""),
-				HTTPHostPort:           ports.GetAddressFromCLIOptions(ports.QueryHTTP, ""),
-				TLSHTTP:                TLSHTTP,
-				TLSGRPC:                test.TLS,
 				BearerTokenPropagation: true,
+				HTTP: confighttp.ServerConfig{
+					Endpoint:   ":0",
+					TLSSetting: tlsHttp,
+				},
+				GRPC: configgrpc.ServerConfig{
+					NetAddr: confignet.AddrConfig{
+						Endpoint:  ":0",
+						Transport: confignet.TransportTypeTCP,
+					},
+					TLSSetting: test.TLS,
+				},
 			}
 			flagsSvc := flags.NewService(ports.QueryAdminHTTP)
-			flagsSvc.Logger = zap.NewNop()
+			flagsSvc.Logger = zaptest.NewLogger(t)
 
-			spanReader := &spanstoremocks.Reader{}
-			dependencyReader := &depsmocks.Reader{}
-			expectedServices := []string{"test"}
-			spanReader.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(expectedServices, nil)
+			querySvc := makeQuerySvc()
+			telset := initTelSet(flagsSvc.Logger, jtracer.NoOp(), flagsSvc.HC())
+			server, err := NewServer(context.Background(), querySvc.qs, &v2querysvc.QueryService{},
+				nil, serverOptions, tenancy.NewManager(&tenancy.Options{}),
+				telset)
+			require.NoError(t, err)
+			require.NoError(t, server.Start(context.Background()))
+			t.Cleanup(func() {
+				require.NoError(t, server.Close())
+			})
 
-			querySvc := querysvc.NewQueryService(spanReader, dependencyReader, querysvc.QueryServiceOptions{})
-			server, err := NewServer(flagsSvc.Logger, querySvc, nil,
-				serverOptions, tenancy.NewManager(&tenancy.Options{}),
-				opentracing.NoopTracer{})
-			assert.Nil(t, err)
-			assert.NoError(t, server.Start())
-
-			var wg sync.WaitGroup
-			wg.Add(1)
-			once := sync.Once{}
-
-			go func() {
-				for s := range server.HealthCheckStatus() {
-					flagsSvc.HC().Set(s)
-					if s == healthcheck.Unavailable {
-						once.Do(func() {
-							wg.Done()
-						})
-					}
-				}
-			}()
-
-			var clientError error
 			var client *grpcClient
-
-			if serverOptions.TLSGRPC.Enabled {
-				clientTLSCfg, err0 := test.clientTLS.Config(zap.NewNop())
+			if serverOptions.GRPC.TLSSetting != nil {
+				clientTLSCfg, err0 := test.clientTLS.LoadTLSConfig(context.Background())
 				require.NoError(t, err0)
 				creds := credentials.NewTLS(clientTLSCfg)
-				client = newGRPCClientWithTLS(t, ports.PortToHostPort(ports.QueryGRPC), creds)
-
+				client = newGRPCClientWithTLS(t, server.GRPCAddr(), creds)
 			} else {
-				client = newGRPCClientWithTLS(t, ports.PortToHostPort(ports.QueryGRPC), nil)
+				client = newGRPCClientWithTLS(t, server.GRPCAddr(), nil)
 			}
+			t.Cleanup(func() {
+				require.NoError(t, client.conn.Close())
+			})
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			// using generous timeout since grpc.NewClient no longer does a handshake.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
+			flagsSvc.Logger.Info("calling client.GetServices()")
 			res, clientError := client.GetServices(ctx, &api_v2.GetServicesRequest{})
+			flagsSvc.Logger.Info("returned from GetServices()")
 
 			if test.expectClientError {
 				require.Error(t, clientError)
 			} else {
 				require.NoError(t, clientError)
-				assert.Equal(t, expectedServices, res.Services)
+				assert.Equal(t, querySvc.expectedServices, res.Services)
 			}
-			require.Nil(t, client.conn.Close())
-			server.Close()
-			wg.Wait()
-			assert.Equal(t, healthcheck.Unavailable, flagsSvc.HC().Get())
 		})
 	}
 }
 
 func TestServerBadHostPort(t *testing.T) {
-	_, err := NewServer(zap.NewNop(), &querysvc.QueryService{}, nil,
-		&QueryOptions{HTTPHostPort: "8080", GRPCHostPort: "127.0.0.1:8081", BearerTokenPropagation: true},
+	telset := initTelSet(zaptest.NewLogger(t), jtracer.NoOp(), healthcheck.New())
+	_, err := NewServer(context.Background(), &querysvc.QueryService{}, &v2querysvc.QueryService{}, nil,
+		&QueryOptions{
+			BearerTokenPropagation: true,
+			HTTP: confighttp.ServerConfig{
+				Endpoint: "8080", // bad string, not :port
+			},
+			GRPC: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint:  "127.0.0.1:8081",
+					Transport: confignet.TransportTypeTCP,
+				},
+			},
+		},
 		tenancy.NewManager(&tenancy.Options{}),
-		opentracing.NoopTracer{})
+		telset)
+	require.Error(t, err)
 
-	assert.NotNil(t, err)
-	_, err = NewServer(zap.NewNop(), &querysvc.QueryService{}, nil,
-		&QueryOptions{HTTPHostPort: "127.0.0.1:8081", GRPCHostPort: "9123", BearerTokenPropagation: true},
+	_, err = NewServer(context.Background(), &querysvc.QueryService{}, &v2querysvc.QueryService{}, nil,
+		&QueryOptions{
+			BearerTokenPropagation: true,
+			HTTP: confighttp.ServerConfig{
+				Endpoint: "127.0.0.1:8081",
+			},
+			GRPC: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint:  "9123", // bad string, not :port
+					Transport: confignet.TransportTypeTCP,
+				},
+			},
+		},
 		tenancy.NewManager(&tenancy.Options{}),
-		opentracing.NoopTracer{})
+		telset)
 
-	assert.NotNil(t, err)
+	require.Error(t, err)
 }
 
 func TestServerInUseHostPort(t *testing.T) {
@@ -571,7 +582,7 @@ func TestServerInUseHostPort(t *testing.T) {
 	conn, err := net.Listen("tcp", availableHostPort)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, conn.Close()) }()
-
+	telset := initTelSet(zaptest.NewLogger(t), jtracer.NoOp(), healthcheck.New())
 	testCases := []struct {
 		name         string
 		httpHostPort string
@@ -583,79 +594,30 @@ func TestServerInUseHostPort(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			server, err := NewServer(
-				zap.NewNop(),
+				context.Background(),
 				&querysvc.QueryService{},
+				&v2querysvc.QueryService{},
 				nil,
 				&QueryOptions{
-					HTTPHostPort:           tc.httpHostPort,
-					GRPCHostPort:           tc.grpcHostPort,
 					BearerTokenPropagation: true,
+					HTTP: confighttp.ServerConfig{
+						Endpoint: tc.httpHostPort,
+					},
+					GRPC: configgrpc.ServerConfig{
+						NetAddr: confignet.AddrConfig{
+							Endpoint:  tc.grpcHostPort,
+							Transport: confignet.TransportTypeTCP,
+						},
+					},
 				},
 				tenancy.NewManager(&tenancy.Options{}),
-				opentracing.NoopTracer{},
+				telset,
 			)
-			assert.NoError(t, err)
-
-			err = server.Start()
-			assert.Error(t, err)
-
-			if server.grpcConn != nil {
-				server.grpcConn.Close()
-			}
-			if server.httpConn != nil {
-				server.httpConn.Close()
-			}
+			require.NoError(t, err)
+			require.Error(t, server.Start(context.Background()))
+			server.Close()
 		})
 	}
-}
-
-func TestServerSinglePort(t *testing.T) {
-	flagsSvc := flags.NewService(ports.QueryAdminHTTP)
-	flagsSvc.Logger = zap.NewNop()
-	hostPort := ports.GetAddressFromCLIOptions(ports.QueryHTTP, "")
-	spanReader := &spanstoremocks.Reader{}
-	dependencyReader := &depsmocks.Reader{}
-	expectedServices := []string{"test"}
-	spanReader.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(expectedServices, nil)
-
-	querySvc := querysvc.NewQueryService(spanReader, dependencyReader, querysvc.QueryServiceOptions{})
-	server, err := NewServer(flagsSvc.Logger, querySvc, nil,
-		&QueryOptions{GRPCHostPort: hostPort, HTTPHostPort: hostPort, BearerTokenPropagation: true},
-		tenancy.NewManager(&tenancy.Options{}),
-		opentracing.NoopTracer{})
-	assert.Nil(t, err)
-	assert.NoError(t, server.Start())
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	once := sync.Once{}
-
-	go func() {
-		for s := range server.HealthCheckStatus() {
-			flagsSvc.HC().Set(s)
-			if s == healthcheck.Unavailable {
-				once.Do(func() {
-					wg.Done()
-				})
-			}
-
-		}
-		wg.Done()
-	}()
-
-	client := newGRPCClient(t, hostPort)
-	defer client.conn.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	res, err := client.GetServices(ctx, &api_v2.GetServicesRequest{})
-	assert.NoError(t, err)
-	assert.Equal(t, expectedServices, res.Services)
-
-	server.Close()
-	wg.Wait()
-	assert.Equal(t, healthcheck.Unavailable, flagsSvc.HC().Get())
 }
 
 func TestServerGracefulExit(t *testing.T) {
@@ -665,28 +627,43 @@ func TestServerGracefulExit(t *testing.T) {
 	assert.Equal(t, 0, logs.Len(), "Expected initial ObservedLogs to have zero length.")
 
 	flagsSvc.Logger = zap.New(zapCore)
-	hostPort := ports.PortToHostPort(ports.QueryAdminHTTP)
+	grpcHostPort := ports.PortToHostPort(ports.QueryGRPC)
+	httpHostPort := ports.PortToHostPort(ports.QueryHTTP)
 
-	querySvc := &querysvc.QueryService{}
-	tracer := opentracing.NoopTracer{}
-
-	server, err := NewServer(flagsSvc.Logger, querySvc, nil, &QueryOptions{GRPCHostPort: hostPort, HTTPHostPort: hostPort},
-		tenancy.NewManager(&tenancy.Options{}), tracer)
-	assert.Nil(t, err)
-	assert.NoError(t, server.Start())
-	go func() {
-		for s := range server.HealthCheckStatus() {
-			flagsSvc.HC().Set(s)
-		}
-	}()
+	querySvc := makeQuerySvc()
+	telset := initTelSet(flagsSvc.Logger, jtracer.NoOp(), flagsSvc.HC())
+	server, err := NewServer(context.Background(), querySvc.qs, &v2querysvc.QueryService{}, nil,
+		&QueryOptions{
+			HTTP: confighttp.ServerConfig{
+				Endpoint: httpHostPort,
+			},
+			GRPC: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint:  grpcHostPort,
+					Transport: confignet.TransportTypeTCP,
+				},
+			},
+		},
+		tenancy.NewManager(&tenancy.Options{}), telset)
+	require.NoError(t, err)
+	require.NoError(t, server.Start(context.Background()))
 
 	// Wait for servers to come up before we can call .Close()
-	// TODO Find a way to wait only as long as necessary. Unconditional sleep slows down the tests.
-	time.Sleep(1 * time.Second)
-	server.Close()
+	{
+		client := newGRPCClient(t, grpcHostPort)
+		t.Cleanup(func() {
+			require.NoError(t, client.conn.Close())
+		})
+		// using generous timeout since grpc.NewClient no longer does a handshake.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := client.GetServices(ctx, &api_v2.GetServicesRequest{})
+		require.NoError(t, err)
+	}
 
+	server.Close()
 	for _, logEntry := range logs.All() {
-		assert.True(t, logEntry.Level != zap.ErrorLevel,
+		assert.NotEqual(t, zap.ErrorLevel, logEntry.Level,
 			"Error log found on server exit: %v", logEntry)
 	}
 }
@@ -697,29 +674,34 @@ func TestServerHandlesPortZero(t *testing.T) {
 	flagsSvc.Logger = zap.New(zapCore)
 
 	querySvc := &querysvc.QueryService{}
-	tracer := opentracing.NoopTracer{}
-	server, err := NewServer(flagsSvc.Logger, querySvc, nil,
-		&QueryOptions{GRPCHostPort: ":0", HTTPHostPort: ":0"},
+	v2QuerySvc := &v2querysvc.QueryService{}
+	telset := initTelSet(flagsSvc.Logger, jtracer.NoOp(), flagsSvc.HC())
+	server, err := NewServer(context.Background(), querySvc, v2QuerySvc, nil,
+		&QueryOptions{
+			HTTP: confighttp.ServerConfig{
+				Endpoint: ":0",
+			},
+			GRPC: configgrpc.ServerConfig{
+				NetAddr: confignet.AddrConfig{
+					Endpoint:  ":0",
+					Transport: confignet.TransportTypeTCP,
+				},
+			},
+		},
 		tenancy.NewManager(&tenancy.Options{}),
-		tracer)
-	assert.Nil(t, err)
-	assert.NoError(t, server.Start())
+		telset)
+	require.NoError(t, err)
+	require.NoError(t, server.Start(context.Background()))
 	defer server.Close()
 
 	message := logs.FilterMessage("Query server started")
 	assert.Equal(t, 1, message.Len(), "Expected 'Query server started' log message.")
 
-	onlyEntry := message.All()[0]
-	port := onlyEntry.ContextMap()["port"].(int64)
-	assert.Greater(t, port, int64(0))
-
 	grpctest.ReflectionServiceValidator{
-		HostPort: fmt.Sprintf(":%v", port),
-		Server:   server.grpcServer,
+		HostPort: server.GRPCAddr(),
 		ExpectedServices: []string{
 			"jaeger.api_v2.QueryService",
 			"jaeger.api_v3.QueryService",
-			"jaeger.api_v2.metrics.MetricsQueryService",
 			"grpc.health.v1.Health",
 		},
 	}.Execute(t)
@@ -735,33 +717,39 @@ func TestServerHTTPTenancy(t *testing.T) {
 		{
 			name: "no tenant",
 			// no value for tenant header
-			status: 401,
+			status: http.StatusUnauthorized,
 		},
 		{
 			name:   "tenant",
 			tenant: "acme",
-			status: 200,
+			status: http.StatusOK,
 		},
 	}
 
 	serverOptions := &QueryOptions{
-		HTTPHostPort: ":8080",
-		GRPCHostPort: ":8080",
 		Tenancy: tenancy.Options{
 			Enabled: true,
+		}, HTTP: confighttp.ServerConfig{
+			Endpoint: ":8080",
+		},
+		GRPC: configgrpc.ServerConfig{
+			NetAddr: confignet.AddrConfig{
+				Endpoint:  ":8081",
+				Transport: confignet.TransportTypeTCP,
+			},
 		},
 	}
 	tenancyMgr := tenancy.NewManager(&serverOptions.Tenancy)
-
-	spanReader := &spanstoremocks.Reader{}
-	dependencyReader := &depsmocks.Reader{}
-
-	querySvc := querysvc.NewQueryService(spanReader, dependencyReader, querysvc.QueryServiceOptions{})
-	server, err := NewServer(zap.NewNop(), querySvc, nil,
-		serverOptions, tenancyMgr,
-		opentracing.NoopTracer{})
-	require.Nil(t, err)
-	require.NoError(t, server.Start())
+	querySvc := makeQuerySvc()
+	querySvc.spanReader.On("FindTraces", mock.Anything, mock.Anything).Return([]*model.Trace{mockTrace}, nil).Once()
+	telset := initTelSet(zaptest.NewLogger(t), jtracer.NoOp(), healthcheck.New())
+	server, err := NewServer(context.Background(), querySvc.qs, &v2querysvc.QueryService{},
+		nil, serverOptions, tenancyMgr, telset)
+	require.NoError(t, err)
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, server.Close())
+	})
 
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
@@ -769,11 +757,11 @@ func TestServerHTTPTenancy(t *testing.T) {
 			require.NoError(t, clientError)
 
 			queryString := "/api/traces?service=service&start=0&end=0&operation=operation&limit=200&minDuration=20ms"
-			req, err := http.NewRequest("GET", "http://localhost:8080"+queryString, nil)
+			req, err := http.NewRequest(http.MethodGet, "http://localhost:8080"+queryString, nil)
 			if test.tenant != "" {
 				req.Header.Add(tenancyMgr.Header, test.tenant)
 			}
-			assert.Nil(t, err)
+			require.NoError(t, err)
 			req.Header.Add("Accept", "application/json")
 
 			client := &http.Client{}
@@ -781,7 +769,7 @@ func TestServerHTTPTenancy(t *testing.T) {
 			if test.errMsg == "" {
 				require.NoError(t, err2)
 			} else {
-				assert.Error(t, err2)
+				require.Error(t, err2)
 				if err != nil {
 					assert.Equal(t, test.errMsg, err2.Error())
 				}
@@ -791,9 +779,97 @@ func TestServerHTTPTenancy(t *testing.T) {
 				resp.Body.Close()
 			}
 			if conn != nil {
-				require.Nil(t, conn.Close())
+				require.NoError(t, conn.Close())
 			}
 		})
 	}
-	server.Close()
+}
+
+func TestServerHTTP_TracesRequest(t *testing.T) {
+	makeMockTrace := func(t *testing.T) *model.Trace {
+		out := new(bytes.Buffer)
+		err := new(jsonpb.Marshaler).Marshal(out, mockTrace)
+		require.NoError(t, err)
+		var trace model.Trace
+		require.NoError(t, jsonpb.Unmarshal(out, &trace))
+		trace.Spans[1].References = []model.SpanRef{
+			{TraceID: model.NewTraceID(0, 0)},
+		}
+		return &trace
+	}
+
+	tests := []struct {
+		name          string
+		httpEndpoint  string
+		grpcEndpoint  string
+		queryString   string
+		expectedTrace string
+	}{
+		{
+			name:          "api v1/v2",
+			httpEndpoint:  ":8080",
+			grpcEndpoint:  ":8081",
+			queryString:   "/api/traces/123456aBC",
+			expectedTrace: "/api/traces/{traceID}",
+		},
+		{
+			name:          "api v3",
+			httpEndpoint:  ":8080",
+			grpcEndpoint:  ":8081",
+			queryString:   "/api/v3/traces/123456aBC",
+			expectedTrace: "/api/v3/traces/{trace_id}",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			serverOptions := &QueryOptions{
+				HTTP: confighttp.ServerConfig{
+					Endpoint: test.httpEndpoint,
+				},
+				GRPC: configgrpc.ServerConfig{
+					NetAddr: confignet.AddrConfig{
+						Endpoint:  test.grpcEndpoint,
+						Transport: confignet.TransportTypeTCP,
+					},
+				},
+			}
+
+			exporter := tracetest.NewInMemoryExporter()
+			tracerProvider := sdktrace.NewTracerProvider(
+				sdktrace.WithSyncer(exporter),
+				sdktrace.WithSampler(sdktrace.AlwaysSample()),
+			)
+			tracer := jtracer.JTracer{OTEL: tracerProvider}
+
+			tenancyMgr := tenancy.NewManager(&serverOptions.Tenancy)
+			querySvc := makeQuerySvc()
+			querySvc.spanReader.On("GetTrace", mock.AnythingOfType("*context.valueCtx"), spanstore.GetTraceParameters{TraceID: model.NewTraceID(0, 0x123456abc)}).
+				Return(makeMockTrace(t), nil).Once()
+			telset := initTelSet(zaptest.NewLogger(t), &tracer, healthcheck.New())
+
+			server, err := NewServer(context.Background(), querySvc.qs, &v2querysvc.QueryService{},
+				nil, serverOptions, tenancyMgr, telset)
+			require.NoError(t, err)
+			require.NoError(t, server.Start(context.Background()))
+			t.Cleanup(func() {
+				require.NoError(t, server.Close())
+			})
+
+			req, err := http.NewRequest(http.MethodGet, "http://localhost:8080"+test.queryString, nil)
+			require.NoError(t, err)
+
+			client := &http.Client{}
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+
+			if test.expectedTrace != "" {
+				assert.Len(t, exporter.GetSpans(), 1, "HTTP request was traced and span reported")
+				assert.Equal(t, test.expectedTrace, exporter.GetSpans()[0].Name)
+			} else {
+				assert.Empty(t, exporter.GetSpans(), "HTTP request was not traced")
+			}
+			require.NoError(t, resp.Body.Close())
+		})
+	}
 }

@@ -1,16 +1,59 @@
 name: Publish release
 
 on:
-  release:
-    types:
-      - published
+  # Disable auto-run, once we sunset 1.x components we might go back to auto-release.
+  #
+  # release:
+  #   types:
+  #     - published
+
+  workflow_dispatch:
+    inputs:
+      # Disable version inputs for now, the build always uses the latest tags.
+      #
+      # version_v1:
+      #   required: true
+      #   type: string
+      #   description: Version number for 1.x components. Don't include a leading `v`.
+
+      # version_v2:
+      #   required: true
+      #   type: string
+      #   description: Version number for 2.x components. Don't include a leading `v`.
+
+      dry_run:
+        required: true
+        type: boolean
+        description: Do a test run. It will only build one platform (for speed) and will not push artifacts.
+
+      overwrite:
+        required: true
+        type: boolean
+        description: Allow overwriting artifacts.
 
 jobs:
   publish-release:
+    permissions:
+      contents: write
+      deployments: write
+    if: github.repository == 'jaegertracing/jaeger'
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - name: Clean up some disk space
+      # We had an issue where the workflow was running out of disk space,
+      # because it downloads so many Docker images for different platforms.
+      # Here we delete some stuff from the VM that we do not use.
+      # Inspired by https://github.com/jlumbroso/free-disk-space.
+      run: |
+        sudo rm -rf /usr/local/lib/android || true
+        df -h /
+
+    - uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+      with:
+        egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+    - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4.2.0
       with:
         submodules: true
 
@@ -18,54 +61,127 @@ jobs:
       run: |
         git fetch --prune --unshallow --tags
 
-    - uses: actions/setup-go@v3
+    - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
       with:
-        go-version: 1.18.x
+        go-version: 1.24.x
 
-    - uses: actions/setup-node@v3
+    - uses: ./.github/actions/setup-node.js
+
+    - name: Determine parameters
+      id: params
+      run: |
+        docker_flags=()
+        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          docker_flags=("${docker_flags[@]}" -l -p linux/amd64)
+          echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+          echo "gpg_key_override=-k skip" >> $GITHUB_OUTPUT
+        else
+          echo "platforms=$(make echo-platforms)" >> $GITHUB_OUTPUT
+        fi
+        if [[ "${{ inputs.overwrite }}" == "true" ]]; then
+          docker_flags=("${docker_flags[@]}" -o)
+        fi
+        echo "docker_flags=${docker_flags[@]}" >> $GITHUB_OUTPUT
+        cat $GITHUB_OUTPUT
+
+    - name: Export BRANCH variable and validate it is a semver
+      # Many scripts depend on BRANCH variable. We do not want to
+      # use ./.github/actions/setup-branch here because it may set
+      # BRANCH=main when the workflow is triggered manually.
+      #
+      # TODO this currently utilizes 1.x version tag, which is ok for v1
+      # binaries, but for tools/utils we may need to change in the future.
+      run: |
+        BRANCH=$(make echo-v1)
+        echo Validate that the latest tag ${BRANCH} is in semver format
+        echo ${BRANCH} | grep -E '^v[0-9]+.[0-9]+.[0-9]+$'
+        echo "BRANCH=${BRANCH}" >> ${GITHUB_ENV}
+
+    - name: Configure GPG Key
+      if: ${{ inputs.dry_run != true }}
+      uses: crazy-max/ghaction-import-gpg@cb9bde2e2525e640591a934b1fd28eef1dcaf5e5 # v6.2.0
       with:
-        node-version: '10'
+        gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+        passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
-    - name: Export BRANCH variable
-      uses: ./.github/actions/setup-branch
-
-    - name: Install tools
-      run: make install-ci
-
-    - name: Build binaries
-      id: build-binaries
-      run: make build-all-platforms
+    - name: Build all binaries
+      run: make build-all-platforms PLATFORMS=${{ steps.params.outputs.platforms }}
 
     - name: Package binaries
-      id: package-binaries
-      run: bash scripts/package-deploy.sh
-      if: steps.build-binaries.outcome == 'success'
+      run: |
+        bash scripts/build/package-deploy.sh \
+          -p ${{ steps.params.outputs.platforms }} \
+          ${{ steps.params.outputs.gpg_key_override }}
 
     - name: Upload binaries
-      uses: svenstaro/upload-release-action@2.3.0
+      if: ${{ inputs.dry_run != true }}
+      uses: svenstaro/upload-release-action@04733e069f2d7f7f0b4aebc4fbdbce8613b03ccd # 2.9.0
       with:
-        file: deploy/*.tar.gz
+        file: '{deploy/*.tar.gz,deploy/*.zip,deploy/*.sha256sum.txt,deploy/*.asc}'
         file_glob: true
-        tag: ${{ github.ref }}
+        overwrite: ${{ inputs.overwrite }}
+        tag: ${{ env.BRANCH }}
         repo_token: ${{ secrets.GITHUB_TOKEN }}
-      if: steps.package-binaries.outcome == 'success'
 
-    - uses: docker/setup-qemu-action@v2
+    - name: Delete the release artifacts after uploading them.
+      run: |
+        rm -rf deploy || true
+        df -h /
 
-    - name: Build and upload all docker images
-      run: bash scripts/build-upload-docker-images.sh
+    - uses: docker/setup-qemu-action@53851d14592bedcffcf25ea515637cff71ef929a # v3.3.0
+
+    - name: Build and upload all container images
+      # -B skips building the binaries since we already did that above
+      run: |
+        bash scripts/build/build-upload-docker-images.sh -B \
+          ${{ steps.params.outputs.docker_flags }}
       env:
         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
 
-    - name: Build, test, and publish all-in-one image
-      run: bash scripts/build-all-in-one-image.sh
+    - name: Build, test, and publish all-in-one v1 image
+      run: |
+        BRANCH=$(make echo-v1) \
+        bash scripts/build/build-all-in-one-image.sh \
+          ${{ steps.params.outputs.docker_flags }} \
+          v1
+      env:
+        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+
+    - name: Build, test, and publish v2 image
+      run: |
+        BRANCH=$(make echo-v2) \
+        bash scripts/build/build-all-in-one-image.sh \
+          ${{ steps.params.outputs.docker_flags }} \
+          v2
       env:
         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
 
     - name: Build, test, and publish hotrod image
-      run: bash scripts/hotrod-integration-test.sh
+      run: |
+        bash scripts/build/build-hotrod-image.sh \
+          ${{ steps.params.outputs.docker_flags }}
       env:
         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+
+    - name: Generate SBOM
+      uses: anchore/sbom-action@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
+      with:
+        output-file: jaeger-SBOM.spdx.json
+        upload-release-assets: false
+        upload-artifact: false
+
+    - name: Upload SBOM
+      # Upload SBOM manually, because anchore/sbom-action does not do that
+      # when the workflow is triggered manually, only from a release.
+      uses: svenstaro/upload-release-action@04733e069f2d7f7f0b4aebc4fbdbce8613b03ccd # 2.9.0
+      if: ${{ inputs.dry_run != true }}
+      with:
+        file: jaeger-SBOM.spdx.json
+        overwrite: ${{ inputs.overwrite }}
+        # TODO this will only work for 1.x artifacts
+        tag: ${{ env.BRANCH }}
+        repo_token: ${{ secrets.GITHUB_TOKEN }}

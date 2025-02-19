@@ -1,16 +1,5 @@
 // Copyright (c) 2019 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package auth
 
@@ -42,9 +31,8 @@ func (x *scramClient) Begin(userName, password, authzID string) (err error) {
 
 // Step steps client through the SCRAM exchange. It is
 // called repeatedly until it errors or `Done` returns true.
-func (x *scramClient) Step(challenge string) (response string, err error) {
-	response, err = x.ClientConversation.Step(challenge)
-	return
+func (x *scramClient) Step(challenge string) (string, error) {
+	return x.ClientConversation.Step(challenge)
 }
 
 // Done should return true when the SCRAM conversation
@@ -84,7 +72,6 @@ func setPlainTextConfiguration(config *PlainTextConfig, saramaConfig *sarama.Con
 
 	default:
 		return fmt.Errorf("config plaintext.mechanism error: %s, only support 'SCRAM-SHA-256' or 'SCRAM-SHA-512' or 'PLAIN'", config.Mechanism)
-
 	}
 	return nil
 }

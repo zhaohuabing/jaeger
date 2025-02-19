@@ -1,16 +1,5 @@
 // Copyright (c) 2022 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 // Must use separate test package to break import cycle.
 package metrics_test
@@ -20,9 +9,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaegertracing/jaeger/internal/metricstest"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
+	"github.com/jaegertracing/jaeger/pkg/testutils"
 )
 
 func TestInitMetrics(t *testing.T) {
@@ -39,7 +30,7 @@ func TestInitMetrics(t *testing.T) {
 	globalTags := map[string]string{"key": "value"}
 
 	err := metrics.Init(&testMetrics, f, globalTags)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	testMetrics.Gauge.Update(10)
 	testMetrics.Counter.Inc(5)
@@ -64,7 +55,7 @@ func TestInitMetrics(t *testing.T) {
 
 	stopwatch := metrics.StartStopwatch(testMetrics.Timer)
 	stopwatch.Stop()
-	assert.True(t, 0 < stopwatch.ElapsedTime())
+	assert.Positive(t, stopwatch.ElapsedTime())
 }
 
 var (
@@ -94,21 +85,21 @@ var (
 )
 
 func TestInitMetricsFailures(t *testing.T) {
-	assert.EqualError(t, metrics.Init(&noMetricTag, nil, nil), "Field NoMetricTag is missing a tag 'metric'")
+	require.EqualError(t, metrics.Init(&noMetricTag, nil, nil), "Field NoMetricTag is missing a tag 'metric'")
 
-	assert.EqualError(t, metrics.Init(&badTags, nil, nil),
+	require.EqualError(t, metrics.Init(&badTags, nil, nil),
 		"Field [BadTags]: Tag [noValue] is not of the form key=value in 'tags' string [1=one,noValue]")
 
-	assert.EqualError(t, metrics.Init(&invalidMetricType, nil, nil),
+	require.EqualError(t, metrics.Init(&invalidMetricType, nil, nil),
 		"Field InvalidMetricType is not a pointer to timer, gauge, or counter")
 
-	assert.EqualError(t, metrics.Init(&badHistogramBucket, nil, nil),
+	require.EqualError(t, metrics.Init(&badHistogramBucket, nil, nil),
 		"Field [BadHistogramBucket]: Bucket [a] could not be converted to float64 in 'buckets' string [1,2,a,4]")
 
-	assert.EqualError(t, metrics.Init(&badTimerBucket, nil, nil),
+	require.EqualError(t, metrics.Init(&badTimerBucket, nil, nil),
 		"Field [BadTimerBucket]: Buckets are not currently initialized for timer metrics")
 
-	assert.EqualError(t, metrics.Init(&invalidBuckets, nil, nil),
+	require.EqualError(t, metrics.Init(&invalidBuckets, nil, nil),
 		"Field [InvalidBuckets]: Buckets should only be defined for Timer and Histogram metric types")
 }
 
@@ -122,7 +113,7 @@ func TestInitPanic(t *testing.T) {
 	metrics.MustInit(&noMetricTag, metrics.NullFactory, nil)
 }
 
-func TestNullMetrics(t *testing.T) {
+func TestNullMetrics(*testing.T) {
 	// This test is just for cover
 	metrics.NullFactory.Timer(metrics.TimerOptions{
 		Name: "name",
@@ -141,4 +132,8 @@ func TestNullMetrics(t *testing.T) {
 	}).Gauge(metrics.Options{
 		Name: "name2",
 	}).Update(0)
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

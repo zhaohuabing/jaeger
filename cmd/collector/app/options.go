@@ -1,27 +1,16 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
 import (
 	"go.uber.org/zap"
 
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/flags"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/processor"
 	"github.com/jaegertracing/jaeger/cmd/collector/app/sanitizer"
-	"github.com/jaegertracing/jaeger/model"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
 )
 
@@ -42,6 +31,7 @@ type options struct {
 	extraFormatTypes       []processor.SpanFormat
 	collectorTags          map[string]string
 	spanSizeMetricsEnabled bool
+	onDroppedSpan          func(span *model.Span)
 }
 
 // Option is a function that sets some option on StorageBuilder.
@@ -81,9 +71,9 @@ func (options) PreProcessSpans(preProcessSpans ProcessSpans) Option {
 }
 
 // Sanitizer creates an Option that initializes the sanitizer function
-func (options) Sanitizer(sanitizer sanitizer.SanitizeSpan) Option {
+func (options) Sanitizer(spanSanitizer sanitizer.SanitizeSpan) Option {
 	return func(b *options) {
-		b.sanitizer = sanitizer
+		b.sanitizer = spanSanitizer
 	}
 }
 
@@ -164,7 +154,14 @@ func (options) SpanSizeMetricsEnabled(spanSizeMetrics bool) Option {
 	}
 }
 
-func (o options) apply(opts ...Option) options {
+// OnDroppedSpan creates an Option that initializes the onDroppedSpan function
+func (options) OnDroppedSpan(onDroppedSpan func(span *model.Span)) Option {
+	return func(b *options) {
+		b.onDroppedSpan = onDroppedSpan
+	}
+}
+
+func (options) apply(opts ...Option) options {
 	ret := options{}
 	for _, opt := range opts {
 		opt(&ret)
@@ -179,16 +176,16 @@ func (o options) apply(opts ...Option) options {
 		ret.hostMetrics = metrics.NullFactory
 	}
 	if ret.preProcessSpans == nil {
-		ret.preProcessSpans = func(spans []*model.Span, tenant string) {}
+		ret.preProcessSpans = func(_ processor.Batch) {}
 	}
 	if ret.sanitizer == nil {
 		ret.sanitizer = func(span *model.Span) *model.Span { return span }
 	}
 	if ret.preSave == nil {
-		ret.preSave = func(span *model.Span, tenant string) {}
+		ret.preSave = func(_ *model.Span, _ /* tenant */ string) {}
 	}
 	if ret.spanFilter == nil {
-		ret.spanFilter = func(span *model.Span) bool { return true }
+		ret.spanFilter = func(_ *model.Span) bool { return true }
 	}
 	if ret.numWorkers == 0 {
 		ret.numWorkers = flags.DefaultNumWorkers

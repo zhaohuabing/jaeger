@@ -15,7 +15,6 @@ We gratefully welcome improvements to documentation as well as to code.
 
 ### Pre-requisites
 * Install [Go](https://golang.org/doc/install) and setup GOPATH and add $GOPATH/bin in PATH
-* Install [Yarn](https://yarnpkg.com/) for running local build with the UI
 
 This library uses Go modules to manage dependencies.
 
@@ -76,12 +75,6 @@ the source code for the UI assets (requires Node.js 6+).
 The assets must be compiled first with `make build-ui`, which runs Node.js build and then
 packages the assets into a Go file that is `.gitignore`-ed.
 
-The packaged assets can be enabled by providing a build tag `ui`, for example:
-
-```
-$ go run -tags ui ./cmd/all-in-one/main.go
-```
-
 `make run-all-in-one` essentially runs Jaeger all-in-one by combining both of the above
 steps into a single `make` command.
 
@@ -100,7 +93,7 @@ github.com/jaegertracing/jaeger
       main.go
   crossdock/                - Cross-repo integration test configuration
   examples/
-      hotrod/               - Demo application that uses OpenTracing API
+      hotrod/               - Demo application that demonstrates the use of tracing instrumentation
   idl/                      - (submodule) https://github.com/jaegertracing/jaeger-idl
   jaeger-ui/                - (submodule) https://github.com/jaegertracing/jaeger-ui
   model/                    - Where models are kept, e.g. Process, Span, Trace
@@ -132,7 +125,7 @@ github.com/jaegertracing/jaeger
 
 ## Imports grouping
 
-This projects follows the following pattern for grouping imports in Go files:
+This project follows the following pattern for grouping imports in Go files:
 
 - imports from standard library
 - imports from other projects
@@ -185,10 +178,7 @@ requires connection to Cassandra
 ```
 
 ## Merging PRs
-For maintainers: before merging a PR make sure:
-* the title is descriptive and follows [a good commit message](./CONTRIBUTING_GUIDELINES.md)
-* pull request is assigned to the current release milestone
-* add `changelog:*` and other labels
+**For maintainers:** before merging a PR make sure the title is descriptive and follows [a good commit message](./CONTRIBUTING_GUIDELINES.md)
 
 Merge the PR by using "Squash and merge" option on Github. Avoid creating merge commits.
 After the merge make sure referenced issues were closed.
@@ -216,8 +206,21 @@ After the merge make sure referenced issues were closed.
 * Ensure all references to the flag's variables have been removed in code.
 * Ensure a "Breaking Changes" entry is added in the [CHANGELOG](./CHANGELOG.md) indicating which CLI flag
 is being removed and which CLI flag should be used in favor of this removed flag.
-  
+
 For example:
 ```
 * Remove deprecated flags `--old-flag`, please use `--new-flag` ([#1234](<pull-request URL>), [@myusername](https://github.com/myusername))
 ```
+
+## Using Feature Gates for Breaking Changes
+
+As much as possible, use OTel Collector's [feature gates][feature_gates] to manage breaking changes. For example, consider that we discovered a bug in the existing behavior, such as https://github.com/jaegertracing/jaeger/issues/5270. Simply changing the behavior might be a breaking change, so we implement a new behavior and create an internal config setting that enables or disables it. But how will users ever know and be encouraged to migrate to the new behavior? For that we can create a feature gate (without even creating any additional user-facing configuration), as follows:
+  * Introduce a new feature gate, with the name `jaeger.***`.
+  * If we don't want to change the default behavior right away, we can start the feature in the Alpha state, where it is disabled by default. No breaking changes need to be called out in the changelog.
+  * If we do want to change the default behavior right away, we can start the feature in the Beta state, where it is enabled by default, but the user can still disable it. Call out a breaking change in the changelog.
+  * Two releases later change the gate to Stable, where it is not only enabled by default, but trying to disable it will cause a runtime error. The code for the old behavior should be removed. Call out a breaking change in the changelog.
+  * Two releases later remove the feature gate as unused. Call out a breaking change in the changelog.
+
+See https://github.com/jaegertracing/jaeger/pull/6441 for an example of this workflow.
+
+[feature_gates]: https://github.com/open-telemetry/opentelemetry-collector/blob/main/featuregate/README.md

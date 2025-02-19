@@ -1,306 +1,283 @@
 // Copyright (c) 2021 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package apiv3
 
 import (
 	"context"
-	"fmt"
+	"iter"
 	"net"
 	"testing"
+	"time"
 
-	"github.com/gogo/protobuf/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/jaegertracing/jaeger/cmd/query/app/querysvc"
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger/cmd/query/app/querysvc/v2/querysvc"
+	"github.com/jaegertracing/jaeger/internal/proto/api_v3"
+	dependencyStoreMocks "github.com/jaegertracing/jaeger/internal/storage/v2/api/depstore/mocks"
+	"github.com/jaegertracing/jaeger/internal/storage/v2/api/tracestore"
+	tracestoremocks "github.com/jaegertracing/jaeger/internal/storage/v2/api/tracestore/mocks"
 	_ "github.com/jaegertracing/jaeger/pkg/gogocodec" // force gogo codec registration
-	"github.com/jaegertracing/jaeger/proto-gen/api_v3"
-	dependencyStoreMocks "github.com/jaegertracing/jaeger/storage/dependencystore/mocks"
-	"github.com/jaegertracing/jaeger/storage/spanstore"
-	spanstoremocks "github.com/jaegertracing/jaeger/storage/spanstore/mocks"
 )
+
+var matchContext = mock.AnythingOfType("*context.valueCtx")
 
 func newGrpcServer(t *testing.T, handler *Handler) (*grpc.Server, net.Addr) {
 	server := grpc.NewServer()
 	api_v3.RegisterQueryServiceServer(server, handler)
 
-	lis, _ := net.Listen("tcp", ":0")
+	lis, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
 	go func() {
 		err := server.Serve(lis)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}()
-
+	t.Cleanup(func() { server.Stop() })
 	return server, lis.Addr()
 }
 
+type testServerClient struct {
+	server  *grpc.Server
+	address net.Addr
+	reader  *tracestoremocks.Reader
+	client  api_v3.QueryServiceClient
+}
+
+func newTestServerClient(t *testing.T) *testServerClient {
+	tsc := &testServerClient{
+		reader: &tracestoremocks.Reader{},
+	}
+
+	q := querysvc.NewQueryService(
+		tsc.reader,
+		&dependencyStoreMocks.Reader{},
+		querysvc.QueryServiceOptions{},
+	)
+	h := &Handler{
+		QueryService: q,
+	}
+	tsc.server, tsc.address = newGrpcServer(t, h)
+
+	conn, err := grpc.NewClient(
+		tsc.address.String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	tsc.client = api_v3.NewQueryServiceClient(conn)
+
+	return tsc
+}
+
 func TestGetTrace(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("GetTrace", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("model.TraceID")).Return(
-		&model.Trace{
-			Spans: []*model.Span{
-				{
-					OperationName: "foobar",
-				},
+	testCases := []struct {
+		name          string
+		expectedQuery tracestore.GetTraceParams
+		request       api_v3.GetTraceRequest
+	}{
+		{
+			"TestGetTrace",
+			tracestore.GetTraceParams{
+				TraceID: traceID,
+				Start:   time.Time{},
+				End:     time.Time{},
 			},
-		}, nil).Once()
-
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
+			api_v3.GetTraceRequest{TraceId: "1"},
+		},
+		{
+			"TestGetTraceWithTimeWindow",
+			tracestore.GetTraceParams{
+				TraceID: traceID,
+				Start:   time.Unix(1, 2).UTC(),
+				End:     time.Unix(3, 4).UTC(),
+			},
+			api_v3.GetTraceRequest{
+				TraceId:   "1",
+				StartTime: time.Unix(1, 2).UTC(),
+				EndTime:   time.Unix(3, 4).UTC(),
+			},
+		},
 	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
 
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	getTraceStream, err := client.GetTrace(context.Background(), &api_v3.GetTraceRequest{
-		TraceId: "156",
-	})
-	require.NoError(t, err)
-	spansChunk, err := getTraceStream.Recv()
-	require.NoError(t, err)
-	require.Equal(t, 1, len(spansChunk.GetResourceSpans()))
-	assert.Equal(t, "foobar", spansChunk.GetResourceSpans()[0].GetInstrumentationLibrarySpans()[0].GetSpans()[0].GetName())
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tsc := newTestServerClient(t)
+			tsc.reader.On("GetTraces", matchContext, tc.expectedQuery).
+				Return(iter.Seq2[[]ptrace.Traces, error](func(yield func([]ptrace.Traces, error) bool) {
+					yield([]ptrace.Traces{makeTestTrace()}, nil)
+				})).Once()
+
+			getTraceStream, err := tsc.client.GetTrace(context.Background(), &tc.request)
+			require.NoError(t, err)
+			recv, err := getTraceStream.Recv()
+			require.NoError(t, err)
+			td := recv.ToTraces()
+			require.EqualValues(t, 1, td.SpanCount())
+			assert.Equal(t, "foobar",
+				td.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).Name())
+		})
+	}
 }
 
-func TestGetTrace_storage_error(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("GetTrace", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("model.TraceID")).Return(
-		nil, fmt.Errorf("storage_error")).Once()
+func TestGetTraceStorageError(t *testing.T) {
+	tsc := newTestServerClient(t)
+	tsc.reader.On("GetTraces", matchContext, tracestore.GetTraceParams{TraceID: traceID}).
+		Return(iter.Seq2[[]ptrace.Traces, error](func(yield func([]ptrace.Traces, error) bool) {
+			yield(nil, assert.AnError)
+		})).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	getTraceStream, err := client.GetTrace(context.Background(), &api_v3.GetTraceRequest{
-		TraceId: "156",
+	getTraceStream, err := tsc.client.GetTrace(context.Background(), &api_v3.GetTraceRequest{
+		TraceId: "1",
 	})
 	require.NoError(t, err)
-	spansChunk, err := getTraceStream.Recv()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "storage_error")
-	assert.Nil(t, spansChunk)
+	recv, err := getTraceStream.Recv()
+	require.ErrorContains(t, err, assert.AnError.Error())
+	assert.Nil(t, recv)
 }
 
-func TestGetTrace_traceID_error(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("GetTrace", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("model.TraceID")).Return(
-		&model.Trace{
-			Spans: []*model.Span{},
-		}, nil).Once()
+func TestGetTraceTraceIDError(t *testing.T) {
+	tsc := newTestServerClient(t)
+	tsc.reader.On("GetTraces", matchContext, mock.AnythingOfType("tracestore.GetTraceParams")).
+		Return(iter.Seq2[[]ptrace.Traces, error](func(yield func([]ptrace.Traces, error) bool) {
+			yield([]ptrace.Traces{}, nil)
+		})).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	getTraceStream, err := client.GetTrace(context.Background(), &api_v3.GetTraceRequest{
-		TraceId: "Z",
+	getTraceStream, err := tsc.client.GetTrace(context.Background(), &api_v3.GetTraceRequest{
+		TraceId:   "Z",
+		StartTime: time.Now().Add(-2 * time.Hour),
+		EndTime:   time.Now(),
 	})
 	require.NoError(t, err)
-	spansChunk, err := getTraceStream.Recv()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "strconv.ParseUint:")
-	assert.Nil(t, spansChunk)
+	recv, err := getTraceStream.Recv()
+	require.ErrorContains(t, err, "strconv.ParseUint:")
+	assert.Nil(t, recv)
 }
 
 func TestFindTraces(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("FindTraces", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("*spanstore.TraceQueryParameters")).Return(
-		[]*model.Trace{
-			{
-				Spans: []*model.Span{
-					{
-						OperationName: "name",
-					},
-				},
-			},
-		}, nil).Once()
+	tsc := newTestServerClient(t)
+	tsc.reader.On("FindTraces", matchContext, mock.AnythingOfType("tracestore.TraceQueryParams")).
+		Return(iter.Seq2[[]ptrace.Traces, error](func(yield func([]ptrace.Traces, error) bool) {
+			yield([]ptrace.Traces{makeTestTrace()}, nil)
+		})).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	responseStream, err := client.FindTraces(context.Background(), &api_v3.FindTracesRequest{
+	responseStream, err := tsc.client.FindTraces(context.Background(), &api_v3.FindTracesRequest{
 		Query: &api_v3.TraceQueryParameters{
 			ServiceName:   "myservice",
-			OperationName: "opname",
+			OperationName: "foobar",
 			Attributes:    map[string]string{"foo": "bar"},
-			StartTimeMin:  &types.Timestamp{},
-			StartTimeMax:  &types.Timestamp{},
-			DurationMin:   &types.Duration{},
-			DurationMax:   &types.Duration{},
+			StartTimeMin:  time.Now().Add(-2 * time.Hour),
+			StartTimeMax:  time.Now(),
+			DurationMin:   1 * time.Second,
+			DurationMax:   2 * time.Second,
+			SearchDepth:   10,
 		},
 	})
 	require.NoError(t, err)
 	recv, err := responseStream.Recv()
 	require.NoError(t, err)
-	assert.Equal(t, 1, len(recv.GetResourceSpans()))
+	td := recv.ToTraces()
+	require.EqualValues(t, 1, td.SpanCount())
 }
 
-func TestFindTraces_query_nil(t *testing.T) {
-	q := querysvc.NewQueryService(&spanstoremocks.Reader{}, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{QueryService: q}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
+func TestFindTracesSendError(t *testing.T) {
+	reader := new(tracestoremocks.Reader)
+	reader.On("FindTraces", mock.Anything, mock.AnythingOfType("tracestore.TraceQueryParams")).
+		Return(iter.Seq2[[]ptrace.Traces, error](func(yield func([]ptrace.Traces, error) bool) {
+			yield([]ptrace.Traces{makeTestTrace()}, nil)
+		})).Once()
+	h := &Handler{
+		QueryService: querysvc.NewQueryService(
+			reader,
+			new(dependencyStoreMocks.Reader),
+			querysvc.QueryServiceOptions{},
+		),
+	}
+	err := h.internalFindTraces(context.Background(),
+		&api_v3.FindTracesRequest{
+			Query: &api_v3.TraceQueryParameters{
+				StartTimeMin: time.Now().Add(-2 * time.Hour),
+				StartTimeMax: time.Now(),
+			},
+		},
+		/* streamSend= */ func(*api_v3.TracesData) error {
+			return assert.AnError
+		},
+	)
+	require.ErrorContains(t, err, assert.AnError.Error())
+	require.ErrorContains(t, err, "failed to send response")
+}
 
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	responseStream, err := client.FindTraces(context.Background(), &api_v3.FindTracesRequest{})
+func TestFindTracesQueryNil(t *testing.T) {
+	tsc := newTestServerClient(t)
+	responseStream, err := tsc.client.FindTraces(context.Background(), &api_v3.FindTracesRequest{})
 	require.NoError(t, err)
 	recv, err := responseStream.Recv()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing query")
+	require.ErrorContains(t, err, "missing query")
 	assert.Nil(t, recv)
 
-	responseStream, err = client.FindTraces(context.Background(), &api_v3.FindTracesRequest{
-		Query: &api_v3.TraceQueryParameters{
-			StartTimeMin: nil,
-			StartTimeMax: nil,
-		},
+	responseStream, err = tsc.client.FindTraces(context.Background(), &api_v3.FindTracesRequest{
+		Query: &api_v3.TraceQueryParameters{},
 	})
 	require.NoError(t, err)
 	recv, err = responseStream.Recv()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "start time min and max are required parameters")
+	require.ErrorContains(t, err, "start time min and max are required parameters")
 	assert.Nil(t, recv)
 }
 
-func TestFindTraces_storage_error(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("FindTraces", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("*spanstore.TraceQueryParameters")).Return(
-		nil, fmt.Errorf("storage_error"), nil).Once()
+func TestFindTracesStorageError(t *testing.T) {
+	tsc := newTestServerClient(t)
+	tsc.reader.On("FindTraces", matchContext, mock.AnythingOfType("tracestore.TraceQueryParams")).
+		Return(iter.Seq2[[]ptrace.Traces, error](func(yield func([]ptrace.Traces, error) bool) {
+			yield(nil, assert.AnError)
+		})).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	responseStream, err := client.FindTraces(context.Background(), &api_v3.FindTracesRequest{
+	responseStream, err := tsc.client.FindTraces(context.Background(), &api_v3.FindTracesRequest{
 		Query: &api_v3.TraceQueryParameters{
-			StartTimeMin: &types.Timestamp{},
-			StartTimeMax: &types.Timestamp{},
-			DurationMin:  &types.Duration{},
-			DurationMax:  &types.Duration{},
+			StartTimeMin: time.Now().Add(-2 * time.Hour),
+			StartTimeMax: time.Now(),
 		},
 	})
 	require.NoError(t, err)
 	recv, err := responseStream.Recv()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "storage_error")
+	require.ErrorContains(t, err, assert.AnError.Error())
 	assert.Nil(t, recv)
 }
 
 func TestGetServices(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(
+	tsc := newTestServerClient(t)
+	tsc.reader.On("GetServices", matchContext).Return(
 		[]string{"foo"}, nil).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	response, err := client.GetServices(context.Background(), &api_v3.GetServicesRequest{})
+	response, err := tsc.client.GetServices(context.Background(), &api_v3.GetServicesRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"foo"}, response.GetServices())
 }
 
-func TestGetServices_storage_error(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("GetServices", mock.AnythingOfType("*context.valueCtx")).Return(
-		nil, fmt.Errorf("storage_error")).Once()
+func TestGetServicesStorageError(t *testing.T) {
+	tsc := newTestServerClient(t)
+	tsc.reader.On("GetServices", matchContext).Return(
+		nil, assert.AnError).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	response, err := client.GetServices(context.Background(), &api_v3.GetServicesRequest{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "storage_error")
+	response, err := tsc.client.GetServices(context.Background(), &api_v3.GetServicesRequest{})
+	require.ErrorContains(t, err, assert.AnError.Error())
 	assert.Nil(t, response)
 }
 
 func TestGetOperations(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("GetOperations", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("spanstore.OperationQueryParameters")).Return(
-		[]spanstore.Operation{
+	tsc := newTestServerClient(t)
+	tsc.reader.On("GetOperations", matchContext, mock.AnythingOfType("tracestore.OperationQueryParams")).Return(
+		[]tracestore.Operation{
 			{
 				Name: "get_users",
 			},
 		}, nil).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	response, err := client.GetOperations(context.Background(), &api_v3.GetOperationsRequest{})
+	response, err := tsc.client.GetOperations(context.Background(), &api_v3.GetOperationsRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, []*api_v3.Operation{
 		{
@@ -309,24 +286,12 @@ func TestGetOperations(t *testing.T) {
 	}, response.GetOperations())
 }
 
-func TestGetOperations_storage_error(t *testing.T) {
-	r := &spanstoremocks.Reader{}
-	r.On("GetOperations", mock.AnythingOfType("*context.valueCtx"), mock.AnythingOfType("spanstore.OperationQueryParameters")).Return(
-		nil, fmt.Errorf("storage_error")).Once()
+func TestGetOperationsStorageError(t *testing.T) {
+	tsc := newTestServerClient(t)
+	tsc.reader.On("GetOperations", matchContext, mock.AnythingOfType("tracestore.OperationQueryParams")).Return(
+		nil, assert.AnError).Once()
 
-	q := querysvc.NewQueryService(r, &dependencyStoreMocks.Reader{}, querysvc.QueryServiceOptions{})
-	h := &Handler{
-		QueryService: q,
-	}
-	server, addr := newGrpcServer(t, h)
-	defer server.Stop()
-
-	conn, err := grpc.DialContext(context.Background(), addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer conn.Close()
-	client := api_v3.NewQueryServiceClient(conn)
-	response, err := client.GetOperations(context.Background(), &api_v3.GetOperationsRequest{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "storage_error")
+	response, err := tsc.client.GetOperations(context.Background(), &api_v3.GetOperationsRequest{})
+	require.ErrorContains(t, err, assert.AnError.Error())
 	assert.Nil(t, response)
 }

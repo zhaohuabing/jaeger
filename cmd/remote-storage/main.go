@@ -1,16 +1,5 @@
 // Copyright (c) 2022 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package main
 
@@ -21,19 +10,22 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/metric/noop"
 	_ "go.uber.org/automaxprocs"
 	"go.uber.org/zap"
 
-	"github.com/jaegertracing/jaeger/cmd/docs"
-	"github.com/jaegertracing/jaeger/cmd/env"
-	"github.com/jaegertracing/jaeger/cmd/flags"
+	"github.com/jaegertracing/jaeger/cmd/internal/docs"
+	"github.com/jaegertracing/jaeger/cmd/internal/env"
+	"github.com/jaegertracing/jaeger/cmd/internal/flags"
+	"github.com/jaegertracing/jaeger/cmd/internal/printconfig"
+	"github.com/jaegertracing/jaeger/cmd/internal/status"
 	"github.com/jaegertracing/jaeger/cmd/remote-storage/app"
-	"github.com/jaegertracing/jaeger/cmd/status"
+	storage "github.com/jaegertracing/jaeger/internal/storage/v1/factory"
 	"github.com/jaegertracing/jaeger/pkg/config"
 	"github.com/jaegertracing/jaeger/pkg/metrics"
+	"github.com/jaegertracing/jaeger/pkg/telemetry"
 	"github.com/jaegertracing/jaeger/pkg/tenancy"
 	"github.com/jaegertracing/jaeger/pkg/version"
-	"github.com/jaegertracing/jaeger/plugin/storage"
 	"github.com/jaegertracing/jaeger/ports"
 )
 
@@ -46,7 +38,7 @@ func main() {
 		os.Setenv(storage.SpanStorageTypeEnvVar, "memory")
 		// other storage types default to the same type as SpanStorage
 	}
-	storageFactory, err := storage.NewFactory(storage.FactoryConfigFromEnvAndCLI(os.Args, os.Stderr))
+	storageFactory, err := storage.NewFactory(storage.ConfigFromEnvAndCLI(os.Args, os.Stderr))
 	if err != nil {
 		log.Fatalf("Cannot initialize storage factory: %v", err)
 	}
@@ -56,7 +48,7 @@ func main() {
 		Use:   serviceName,
 		Short: serviceName + " allows sharing single-node storage implementations like memstore or Badger.",
 		Long:  serviceName + ` allows sharing single-node storage implementations like memstore or Badger. It implements Jaeger Remote Storage gRPC API.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ /* args */ []string) error {
 			if err := svc.Start(v); err != nil {
 				return err
 			}
@@ -65,27 +57,30 @@ func main() {
 			metricsFactory := baseFactory.Namespace(metrics.NSOptions{Name: "remote-storage"})
 			version.NewInfoMetrics(metricsFactory)
 
-			opts, err := new(app.Options).InitFromViper(v, logger)
+			opts, err := new(app.Options).InitFromViper(v)
 			if err != nil {
 				logger.Fatal("Failed to parse options", zap.Error(err))
 			}
 
+			baseTelset := telemetry.Settings{
+				Logger:        svc.Logger,
+				Metrics:       baseFactory,
+				ReportStatus:  telemetry.HCAdapter(svc.HC()),
+				MeterProvider: noop.NewMeterProvider(), // TODO
+			}
+
 			storageFactory.InitFromViper(v, logger)
-			if err := storageFactory.Initialize(baseFactory, logger); err != nil {
+			if err := storageFactory.Initialize(baseTelset.Metrics, baseTelset.Logger); err != nil {
 				logger.Fatal("Failed to init storage factory", zap.Error(err))
 			}
 
 			tm := tenancy.NewManager(&opts.Tenancy)
-			server, err := app.NewServer(opts, storageFactory, tm, svc.Logger)
+			telset := baseTelset // copy
+			telset.Metrics = metricsFactory
+			server, err := app.NewServer(opts, storageFactory, tm, telset)
 			if err != nil {
 				logger.Fatal("Failed to create server", zap.Error(err))
 			}
-
-			go func() {
-				for s := range server.HealthCheckStatus() {
-					svc.SetHealthCheckStatus(s)
-				}
-			}()
 
 			if err := server.Start(); err != nil {
 				logger.Fatal("Could not start servers", zap.Error(err))
@@ -105,6 +100,7 @@ func main() {
 	command.AddCommand(env.Command())
 	command.AddCommand(docs.Command(v))
 	command.AddCommand(status.Command(v, ports.QueryAdminHTTP))
+	command.AddCommand(printconfig.Command(v))
 
 	config.AddFlags(
 		v,

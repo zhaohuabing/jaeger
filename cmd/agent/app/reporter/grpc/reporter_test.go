@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package grpc
 
@@ -29,10 +18,10 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/jaegertracing/jaeger/model"
-	"github.com/jaegertracing/jaeger/proto-gen/api_v2"
-	jThrift "github.com/jaegertracing/jaeger/thrift-gen/jaeger"
-	"github.com/jaegertracing/jaeger/thrift-gen/zipkincore"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger-idl/proto-gen/api_v2"
+	jThrift "github.com/jaegertracing/jaeger-idl/thrift-gen/jaeger"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/zipkincore"
 )
 
 type mockSpanHandler struct {
@@ -46,7 +35,7 @@ func (h *mockSpanHandler) getRequests() []*api_v2.PostSpansRequest {
 	return h.requests
 }
 
-func (h *mockSpanHandler) PostSpans(c context.Context, r *api_v2.PostSpansRequest) (*api_v2.PostSpansResponse, error) {
+func (h *mockSpanHandler) PostSpans(_ context.Context, r *api_v2.PostSpansRequest) (*api_v2.PostSpansResponse, error) {
 	h.mux.Lock()
 	defer h.mux.Unlock()
 	h.requests = append(h.requests, r)
@@ -59,10 +48,9 @@ func TestReporter_EmitZipkinBatch(t *testing.T) {
 		api_v2.RegisterCollectorServiceServer(s, handler)
 	})
 	defer s.Stop()
-	conn, err := grpc.Dial(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	//nolint:staticcheck // don't care about errors
-	defer conn.Close()
+	conn, err := grpc.NewClient(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
+	defer conn.Close()
 
 	rep := NewReporter(conn, nil, zap.NewNop())
 
@@ -79,7 +67,7 @@ func TestReporter_EmitZipkinBatch(t *testing.T) {
 			expected: model.Batch{
 				Spans: []*model.Span{{
 					TraceID: model.NewTraceID(0, 1), SpanID: model.NewSpanID(2), OperationName: "jonatan", Duration: time.Microsecond * 1,
-					Tags:    model.KeyValues{{Key: "span.kind", VStr: "client", VType: model.StringType}},
+					Tags:    model.KeyValues{model.SpanKindTag(model.SpanKindClient)},
 					Process: &model.Process{ServiceName: "spring"}, StartTime: tm.UTC(),
 				}},
 			},
@@ -88,9 +76,9 @@ func TestReporter_EmitZipkinBatch(t *testing.T) {
 	for _, test := range tests {
 		err = rep.EmitZipkinBatch(context.Background(), []*zipkincore.Span{test.in})
 		if test.err != "" {
-			assert.EqualError(t, err, test.err)
+			require.EqualError(t, err, test.err)
 		} else {
-			assert.Equal(t, 1, len(handler.requests))
+			assert.Len(t, handler.requests, 1)
 			assert.Equal(t, test.expected, handler.requests[0].GetBatch())
 		}
 	}
@@ -102,10 +90,9 @@ func TestReporter_EmitBatch(t *testing.T) {
 		api_v2.RegisterCollectorServiceServer(s, handler)
 	})
 	defer s.Stop()
-	conn, err := grpc.Dial(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	//nolint:staticcheck // don't care about errors
-	defer conn.Close()
+	conn, err := grpc.NewClient(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
+	defer conn.Close()
 	rep := NewReporter(conn, nil, zap.NewNop())
 
 	tm := time.Unix(158, 0)
@@ -122,21 +109,21 @@ func TestReporter_EmitBatch(t *testing.T) {
 	for _, test := range tests {
 		err = rep.EmitBatch(context.Background(), test.in)
 		if test.err != "" {
-			assert.EqualError(t, err, test.err)
+			require.EqualError(t, err, test.err)
 		} else {
-			assert.Equal(t, 1, len(handler.requests))
+			assert.Len(t, handler.requests, 1)
 			assert.Equal(t, test.expected, handler.requests[0].GetBatch())
 		}
 	}
 }
 
 func TestReporter_SendFailure(t *testing.T) {
-	conn, err := grpc.Dial("", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("invalid-host-name-blah:12345", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
+	defer conn.Close()
 	rep := NewReporter(conn, nil, zap.NewNop())
 	err = rep.send(context.Background(), nil, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "transport: Error while dialing dial tcp: missing address")
+	assert.ErrorContains(t, err, "failed to export spans:")
 }
 
 func TestReporter_AddProcessTags_EmptyTags(t *testing.T) {
@@ -184,7 +171,7 @@ func TestReporter_MakeModelKeyValue(t *testing.T) {
 
 type mockMultitenantSpanHandler struct{}
 
-func (h *mockMultitenantSpanHandler) PostSpans(ctx context.Context, r *api_v2.PostSpansRequest) (*api_v2.PostSpansResponse, error) {
+func (*mockMultitenantSpanHandler) PostSpans(ctx context.Context, _ *api_v2.PostSpansRequest) (*api_v2.PostSpansResponse, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return &api_v2.PostSpansResponse{}, status.Errorf(codes.PermissionDenied, "missing tenant header")
@@ -206,7 +193,7 @@ func TestReporter_MultitenantEmitBatch(t *testing.T) {
 		api_v2.RegisterCollectorServiceServer(s, handler)
 	})
 	defer s.Stop()
-	conn, err := grpc.Dial(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer func() { require.NoError(t, conn.Close()) }()
 	rep := NewReporter(conn, nil, zap.NewNop())
@@ -218,11 +205,11 @@ func TestReporter_MultitenantEmitBatch(t *testing.T) {
 	}{
 		{
 			in:  &jThrift.Batch{Process: &jThrift.Process{ServiceName: "node"}, Spans: []*jThrift.Span{{OperationName: "foo", StartTime: int64(model.TimeAsEpochMicroseconds(tm))}}},
-			err: "rpc error: code = PermissionDenied desc = missing tenant header",
+			err: "missing tenant header",
 		},
 	}
 	for _, test := range tests {
 		err = rep.EmitBatch(context.Background(), test.in)
-		assert.EqualError(t, err, test.err)
+		assert.ErrorContains(t, err, test.err)
 	}
 }

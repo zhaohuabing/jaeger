@@ -1,25 +1,20 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package json
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	"github.com/jaegertracing/jaeger/model/json"
+)
+
+const (
+	jsMaxSafeInteger = int64(1)<<53 - 1
+	jsMinSafeInteger = -jsMaxSafeInteger
 )
 
 // FromDomain converts model.Trace into json.Trace format.
@@ -104,17 +99,17 @@ func (fd fromDomain) convertReferences(span *model.Span) []json.Reference {
 	return out
 }
 
-func (fd fromDomain) convertRefType(refType model.SpanRefType) json.ReferenceType {
+func (fromDomain) convertRefType(refType model.SpanRefType) json.ReferenceType {
 	if refType == model.FollowsFrom {
 		return json.FollowsFrom
 	}
 	return json.ChildOf
 }
 
-func (fd fromDomain) convertKeyValues(keyValues model.KeyValues) []json.KeyValue {
+func (fromDomain) convertKeyValues(keyValues model.KeyValues) []json.KeyValue {
 	out := make([]json.KeyValue, len(keyValues))
 	for i, kv := range keyValues {
-		var value interface{}
+		var value any
 		switch kv.VType {
 		case model.StringType:
 			value = kv.VStr
@@ -122,6 +117,9 @@ func (fd fromDomain) convertKeyValues(keyValues model.KeyValues) []json.KeyValue
 			value = kv.Bool()
 		case model.Int64Type:
 			value = kv.Int64()
+			if kv.Int64() > jsMaxSafeInteger || kv.Int64() < jsMinSafeInteger {
+				value = fmt.Sprintf("%d", value)
+			}
 		case model.Float64Type:
 			value = kv.Float64()
 		case model.BinaryType:
@@ -137,7 +135,7 @@ func (fd fromDomain) convertKeyValues(keyValues model.KeyValues) []json.KeyValue
 	return out
 }
 
-func (fd fromDomain) convertKeyValuesString(keyValues model.KeyValues) []json.KeyValue {
+func (fromDomain) convertKeyValuesString(keyValues model.KeyValues) []json.KeyValue {
 	out := make([]json.KeyValue, len(keyValues))
 	for i, kv := range keyValues {
 		out[i] = json.KeyValue{

@@ -1,16 +1,5 @@
 // Copyright (c) 2018 The Jaeger Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package consumer
 
@@ -29,7 +18,6 @@ import (
 // ProcessorFactoryParams are the parameters of a ProcessorFactory
 type ProcessorFactoryParams struct {
 	Parallelism    int
-	Topic          string
 	BaseProcessor  processor.SpanProcessor
 	SaramaConsumer consumer.Consumer
 	Factory        metrics.Factory
@@ -39,7 +27,6 @@ type ProcessorFactoryParams struct {
 
 // ProcessorFactory is a factory for creating startedProcessors
 type ProcessorFactory struct {
-	topic          string
 	consumer       consumer.Consumer
 	metricsFactory metrics.Factory
 	logger         *zap.Logger
@@ -51,7 +38,6 @@ type ProcessorFactory struct {
 // NewProcessorFactory constructs a new ProcessorFactory
 func NewProcessorFactory(params ProcessorFactoryParams) (*ProcessorFactory, error) {
 	return &ProcessorFactory{
-		topic:          params.Topic,
 		consumer:       params.SaramaConsumer,
 		metricsFactory: params.Factory,
 		logger:         params.Logger,
@@ -61,14 +47,14 @@ func NewProcessorFactory(params ProcessorFactoryParams) (*ProcessorFactory, erro
 	}, nil
 }
 
-func (c *ProcessorFactory) new(partition int32, minOffset int64) processor.SpanProcessor {
+func (c *ProcessorFactory) new(topic string, partition int32, minOffset int64) processor.SpanProcessor {
 	c.logger.Info("Creating new processors", zap.Int32("partition", partition))
 
-	markOffset := func(offset int64) {
-		c.consumer.MarkPartitionOffset(c.topic, partition, offset, "")
+	markOffset := func(offsetVal int64) {
+		c.consumer.MarkPartitionOffset(topic, partition, offsetVal, "")
 	}
 
-	om := offset.NewManager(minOffset, markOffset, partition, c.metricsFactory)
+	om := offset.NewManager(minOffset, markOffset, topic, partition, c.metricsFactory)
 
 	retryProcessor := decorator.NewRetryingProcessor(c.metricsFactory, c.baseProcessor, c.retryOptions...)
 	cp := NewCommittingProcessor(retryProcessor, om)

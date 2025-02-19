@@ -1,17 +1,6 @@
 // Copyright (c) 2018 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package cache
 
@@ -21,9 +10,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/jaegertracing/jaeger/cmd/collector/app/sanitizer/cache/mocks"
+	"github.com/jaegertracing/jaeger/pkg/testutils"
 )
 
 var (
@@ -36,7 +27,7 @@ var (
 // dont_go:generate mockery -name=ServiceAliasMappingStorage
 // dont_go:generate mockery -name=ServiceAliasMappingExternalSource
 
-func getCache(t *testing.T) (*autoRefreshCache, *mocks.ServiceAliasMappingExternalSource, *mocks.ServiceAliasMappingStorage) {
+func getCache(*testing.T) (*autoRefreshCache, *mocks.ServiceAliasMappingExternalSource, *mocks.ServiceAliasMappingStorage) {
 	mockExtSource := &mocks.ServiceAliasMappingExternalSource{}
 	mockStorage := &mocks.ServiceAliasMappingStorage{}
 	logger := zap.NewNop()
@@ -94,7 +85,7 @@ func TestInitialize(t *testing.T) {
 
 	mS.On("Load").Return(testCache1, nil)
 	mE.On("Load").Return(nil, errDefault)
-	assert.NoError(t, c.Initialize())
+	require.NoError(t, c.Initialize())
 	assert.Equal(t, "rt-supply", c.Get("supply"))
 }
 
@@ -104,7 +95,7 @@ func TestInitialize_error(t *testing.T) {
 
 	mS.On("Load").Return(nil, errDefault)
 	mE.On("Load").Return(nil, errDefault)
-	assert.NoError(t, c.Initialize())
+	require.NoError(t, c.Initialize())
 	assert.True(t, c.IsEmpty())
 }
 
@@ -112,18 +103,18 @@ func TestWarmCache(t *testing.T) {
 	c, mE, mS := getCache(t)
 	mS.On("Load").Return(testCache1, nil).Times(1)
 	err := c.warmCache()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "rt-supply", c.Get("supply"))
 
 	mS.On("Load").Return(nil, errDefault).Times(1)
 	mE.On("Load").Return(testCache2, nil).Times(1)
 	err = c.warmCache()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, "rt-demand", c.Get("demand"), "External load should've succeeded")
 
 	mS.On("Load").Return(nil, errDefault).Times(1)
 	mE.On("Load").Return(nil, errDefault).Times(1)
-	assert.Error(t, c.warmCache(), "Both loads should've failed")
+	require.Error(t, c.warmCache(), "Both loads should've failed")
 }
 
 func TestRefreshFromStorage(t *testing.T) {
@@ -226,4 +217,8 @@ func TestIsEmpty(t *testing.T) {
 	assert.True(t, c.IsEmpty())
 	c.cache = testCache2
 	assert.False(t, c.IsEmpty())
+}
+
+func TestMain(m *testing.M) {
+	testutils.VerifyGoLeaks(m)
 }

@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2017 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package app
 
@@ -24,10 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
+	"github.com/jaegertracing/jaeger/cmd/query/app/querysvc"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/metricstore"
+	"github.com/jaegertracing/jaeger/internal/storage/v1/api/spanstore"
 	"github.com/jaegertracing/jaeger/proto-gen/api_v2/metrics"
-	"github.com/jaegertracing/jaeger/storage/metricsstore"
-	"github.com/jaegertracing/jaeger/storage/spanstore"
 )
 
 const (
@@ -44,6 +34,7 @@ const (
 	spanKindParam    = "spanKind"
 	endTimeParam     = "end"
 	prettyPrintParam = "prettyPrint"
+	rawParam         = "raw"
 )
 
 var (
@@ -70,7 +61,7 @@ type (
 	}
 
 	traceQueryParameters struct {
-		spanstore.TraceQueryParameters
+		querysvc.TraceQueryParameters
 		traceIDs []model.TraceID
 	}
 
@@ -83,9 +74,7 @@ type (
 )
 
 func newDurationStringParser() durationParser {
-	return func(s string) (time.Duration, error) {
-		return time.ParseDuration(s)
-	}
+	return time.ParseDuration
 }
 
 func newDurationUnitsParser(units time.Duration) durationParser {
@@ -101,30 +90,31 @@ func newDurationUnitsParser(units time.Duration) durationParser {
 // parseTraceQueryParams takes a request and constructs a model of parameters.
 //
 // Why start/end parameters are expressed in microseconds:
-//     Span searches operate on span latencies, which are expressed as microseconds in the data model, hence why
-//     support for high accuracy in search query parameters is required.
-//     Microsecond precision is a legacy artifact from zipkin origins where timestamps and durations
-//     are in microseconds (see: https://zipkin.io/pages/instrumenting.html).
+// Span searches operate on span latencies, which are expressed as microseconds in the data model, hence why
+// support for high accuracy in search query parameters is required.
+// Microsecond precision is a legacy artifact from zipkin origins where timestamps and durations
+// are in microseconds (see: https://zipkin.io/pages/instrumenting.html).
 //
 // Why duration parameters are expressed as duration strings like "1ms":
-//     The search UI itself does not insist on exact units because it supports string like 1ms.
-//     Go makes parsing duration strings like "1ms" very easy, hence why parsing of such strings is
-//     deferred to the backend rather than Jaeger UI.
+// The search UI itself does not insist on exact units because it supports string like 1ms.
+// Go makes parsing duration strings like "1ms" very easy, hence why parsing of such strings is
+// deferred to the backend rather than Jaeger UI.
 //
 // Trace query syntax:
-//     query ::= param | param '&' query
-//     param ::= service | operation | limit | start | end | minDuration | maxDuration | tag | tags
-//     service ::= 'service=' strValue
-//     operation ::= 'operation=' strValue
-//     limit ::= 'limit=' intValue
-//     start ::= 'start=' intValue in unix microseconds
-//     end ::= 'end=' intValue in unix microseconds
-//     minDuration ::= 'minDuration=' strValue (units are "ns", "us" (or "µs"), "ms", "s", "m", "h")
-//     maxDuration ::= 'maxDuration=' strValue (units are "ns", "us" (or "µs"), "ms", "s", "m", "h")
-//     tag ::= 'tag=' key | 'tag=' keyvalue
-//     key := strValue
-//     keyValue := strValue ':' strValue
-//     tags :== 'tags=' jsonMap
+//
+//	query ::= param | param '&' query
+//	param ::= service | operation | limit | start | end | minDuration | maxDuration | tag | tags
+//	service ::= 'service=' strValue
+//	operation ::= 'operation=' strValue
+//	limit ::= 'limit=' intValue
+//	start ::= 'start=' intValue in unix microseconds
+//	end ::= 'end=' intValue in unix microseconds
+//	minDuration ::= 'minDuration=' strValue (units are "ns", "us" (or "µs"), "ms", "s", "m", "h")
+//	maxDuration ::= 'maxDuration=' strValue (units are "ns", "us" (or "µs"), "ms", "s", "m", "h")
+//	tag ::= 'tag=' key | 'tag=' keyvalue
+//	key := strValue
+//	keyValue := strValue ':' strValue
+//	tags :== 'tags=' jsonMap
 func (p *queryParser) parseTraceQueryParams(r *http.Request) (*traceQueryParameters, error) {
 	service := r.FormValue(serviceParam)
 	operation := r.FormValue(operationParam)
@@ -166,23 +156,31 @@ func (p *queryParser) parseTraceQueryParams(r *http.Request) (*traceQueryParamet
 
 	var traceIDs []model.TraceID
 	for _, id := range r.Form[traceIDParam] {
-		if traceID, err := model.TraceIDFromString(id); err == nil {
-			traceIDs = append(traceIDs, traceID)
-		} else {
+		traceID, err := model.TraceIDFromString(id)
+		if err != nil {
 			return nil, fmt.Errorf("cannot parse traceID param: %w", err)
 		}
+		traceIDs = append(traceIDs, traceID)
+	}
+
+	raw, err := parseBool(r, rawParam)
+	if err != nil {
+		return nil, err
 	}
 
 	traceQuery := &traceQueryParameters{
-		TraceQueryParameters: spanstore.TraceQueryParameters{
-			ServiceName:   service,
-			OperationName: operation,
-			StartTimeMin:  startTime,
-			StartTimeMax:  endTime,
-			Tags:          tags,
-			NumTraces:     limit,
-			DurationMin:   minDuration,
-			DurationMax:   maxDuration,
+		TraceQueryParameters: querysvc.TraceQueryParameters{
+			TraceQueryParameters: spanstore.TraceQueryParameters{
+				ServiceName:   service,
+				OperationName: operation,
+				StartTimeMin:  startTime,
+				StartTimeMax:  endTime,
+				Tags:          tags,
+				NumTraces:     limit,
+				DurationMin:   minDuration,
+				DurationMax:   maxDuration,
+			},
+			RawTraces: raw,
 		},
 		traceIDs: traceIDs,
 	}
@@ -211,39 +209,40 @@ func (p *queryParser) parseDependenciesQueryParams(r *http.Request) (dqp depende
 // parseMetricsQueryParams takes a request and constructs a model of metrics query parameters.
 //
 // Why the API is designed using an end time (endTs) and lookback:
-//     The typical usage of the metrics APIs is to view the most recent metrics from now looking
-//     back a certain period of time, given the value of metrics generally degrades with time. As such, the API
-//     is also designed to mirror the user interface inputs.
+// The typical usage of the metrics APIs is to view the most recent metrics from now looking
+// back a certain period of time, given the value of metrics generally degrades with time. As such, the API
+// is also designed to mirror the user interface inputs.
 //
 // Why times are expressed as unix milliseconds:
-//     - The minimum step size for Prometheus-compliant metrics backends is 1ms,
-//       hence millisecond precision on times is sufficient.
-//     - The metrics API is designed with one primary client in mind, the Jaeger UI. As it is a React.js application,
-//       the maximum supported built-in time precision is milliseconds, making it a convenient precision to use for such a client.
+//   - The minimum step size for Prometheus-compliant metrics backends is 1ms,
+//     hence millisecond precision on times is sufficient.
+//   - The metrics API is designed with one primary client in mind, the Jaeger UI. As it is a React.js application,
+//     the maximum supported built-in time precision is milliseconds, making it a convenient precision to use for such a client.
 //
 // Why durations are expressed as unix milliseconds:
-//     - Given the endTs time is expressed as milliseconds, it follows that lookback durations should use the
-//       same time units to compute the start time.
-//     - As above, the minimum step size for Prometheus-compliant metrics backends is 1ms.
-//     - Other durations are in milliseconds to maintain consistency of units with other parameters in the metrics APIs.
-//     - As the primary client for the metrics API is the Jaeger UI, it is programmatically simpler to supply the
-//       integer representations of durations in milliseconds rather than the human-readable representation such as "1ms".
+//   - Given the endTs time is expressed as milliseconds, it follows that lookback durations should use the
+//     same time units to compute the start time.
+//   - As above, the minimum step size for Prometheus-compliant metrics backends is 1ms.
+//   - Other durations are in milliseconds to maintain consistency of units with other parameters in the metrics APIs.
+//   - As the primary client for the metrics API is the Jaeger UI, it is programmatically simpler to supply the
+//     integer representations of durations in milliseconds rather than the human-readable representation such as "1ms".
 //
 // Metrics query syntax:
-//     query ::= services , [ '&' optionalParams ]
-//     optionalParams := param | param '&' optionalParams
-//     param ::=  groupByOperation | endTs | lookback | step | ratePer | spanKinds
-//     services ::= service | service '&' services
-//     service ::= 'service=' strValue
-//     groupByOperation ::= 'groupByOperation=' boolValue
-//     endTs ::= 'endTs=' intValue in unix milliseconds
-//     lookback ::= 'lookback=' intValue duration in milliseconds
-//     step ::= 'step=' intValue duration in milliseconds
-//     ratePer ::= 'ratePer=' intValue duration in milliseconds
-//     spanKinds ::= spanKind | spanKind '&' spanKinds
-//     spanKind ::= 'spanKind=' spanKindType
-//     spanKindType ::= "unspecified" | "internal" | "server" | "client" | "producer" | "consumer"
-func (p *queryParser) parseMetricsQueryParams(r *http.Request) (bqp metricsstore.BaseQueryParameters, err error) {
+//
+//	query ::= services , [ '&' optionalParams ]
+//	optionalParams := param | param '&' optionalParams
+//	param ::=  groupByOperation | endTs | lookback | step | ratePer | spanKinds
+//	services ::= service | service '&' services
+//	service ::= 'service=' strValue
+//	groupByOperation ::= 'groupByOperation=' boolValue
+//	endTs ::= 'endTs=' intValue in unix milliseconds
+//	lookback ::= 'lookback=' intValue duration in milliseconds
+//	step ::= 'step=' intValue duration in milliseconds
+//	ratePer ::= 'ratePer=' intValue duration in milliseconds
+//	spanKinds ::= spanKind | spanKind '&' spanKinds
+//	spanKind ::= 'spanKind=' spanKindType
+//	spanKindType ::= "unspecified" | "internal" | "server" | "client" | "producer" | "consumer"
+func (p *queryParser) parseMetricsQueryParams(r *http.Request) (bqp metricstore.BaseQueryParameters, err error) {
 	query := r.URL.Query()
 	services, ok := query[serviceParam]
 	if !ok {
@@ -326,7 +325,7 @@ func parseBool(r *http.Request, paramName string) (b bool, err error) {
 	return b, nil
 }
 
-// parseSpanKindParam parses the input span kinds to filter for in the metrics query.
+// parseSpanKinds parses the input span kinds to filter for in the metrics query.
 //
 // Valid input span kinds include:
 // - "unspecified": when no span kind specified in span.
@@ -360,16 +359,16 @@ func parseSpanKinds(r *http.Request, paramName string, defaultSpanKinds []string
 func mapSpanKindsToOpenTelemetry(spanKinds []string) ([]string, error) {
 	otelSpanKinds := make([]string, len(spanKinds))
 	for i, spanKind := range spanKinds {
-		if v, ok := jaegerToOtelSpanKind[spanKind]; ok {
-			otelSpanKinds[i] = v
-		} else {
+		v, ok := jaegerToOtelSpanKind[spanKind]
+		if !ok {
 			return otelSpanKinds, fmt.Errorf("unsupported span kind: '%s'", spanKind)
 		}
+		otelSpanKinds[i] = v
 	}
 	return otelSpanKinds, nil
 }
 
-func (p *queryParser) validateQuery(traceQuery *traceQueryParameters) error {
+func (*queryParser) validateQuery(traceQuery *traceQueryParameters) error {
 	if len(traceQuery.traceIDs) == 0 && traceQuery.ServiceName == "" {
 		return errServiceParameterRequired
 	}
@@ -381,15 +380,14 @@ func (p *queryParser) validateQuery(traceQuery *traceQueryParameters) error {
 	return nil
 }
 
-func (p *queryParser) parseTags(simpleTags []string, jsonTags []string) (map[string]string, error) {
+func (*queryParser) parseTags(simpleTags []string, jsonTags []string) (map[string]string, error) {
 	retMe := make(map[string]string)
 	for _, tag := range simpleTags {
 		keyAndValue := strings.Split(tag, ":")
-		if l := len(keyAndValue); l > 1 {
-			retMe[keyAndValue[0]] = strings.Join(keyAndValue[1:], ":")
-		} else {
+		if l := len(keyAndValue); l <= 1 {
 			return nil, fmt.Errorf("malformed 'tag' parameter, expecting key:value, received: %s", tag)
 		}
+		retMe[keyAndValue[0]] = strings.Join(keyAndValue[1:], ":")
 	}
 	for _, tags := range jsonTags {
 		var fromJSON map[string]string
